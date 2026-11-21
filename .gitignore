@@ -1,0 +1,22 @@
+# secrets: NEVER commit
+.env
+*.env
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# personal state and downloaded data (large; rebuild with dt_alpaca.py / dt_gappers.py)
+store/
+data/
+data_alpaca/
+results/
+results_alpaca/
+logs/
+
+# local tools and personal notes
+.claude/
+Notes.docx
+~$*

@@ -1,0 +1,6 @@
+longport==4.3.7
+pandas
+numpy
+pyarrow
+streamlit
+requests
