@@ -16,7 +16,7 @@ Open **Windows PowerShell** and run one line at a time (PowerShell 5.1 has no `&
 
 ```
 cd $HOME\Documents
-git clone https://github.com/<owner>/DT_Iris.git
+git clone https://github.com/jwonghk2006-gh/DT_Iris.git
 cd DT_Iris
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
