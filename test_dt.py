@@ -636,6 +636,34 @@ def test_power_ranger_skips_missing_opening_minute():
     assert power_ranger("TST", gappy, 4, ctx, {}) == []
 
 
+def test_recorder_refreshes_stale_daily_bars():
+    """2026-11-25: JAGX's saved daily bars predated a 1:15 reverse split (recorded gap +1,657%, real +11%).
+    When the saved close disagrees with Longbridge's previous close, the bars must be re-downloaded."""
+    import dt_record as rec
+    from datetime import date
+    days = pd.date_range("2026-10-01", "2026-11-23", freq="B").date
+    stale = pd.DataFrame({"open": 0.40, "high": 0.42, "low": 0.38, "close": 0.39, "volume": 1e6},
+                         index=[d for d in days if d <= date(2026, 11, 16)])
+    fresh = pd.DataFrame({"open": 6.0, "high": 6.3, "low": 5.7, "close": 6.118, "volume": 1e6}, index=list(days))
+    files, calls = {"JAGX": stale}, []
+    def fake_fetch(sym, start, end, force=False):
+        calls.append(force)
+        if force:
+            files[sym] = fresh
+        return len(files[sym])
+    saved = (rec.gap.load_daily, rec.gap.fetch_daily)
+    rec.gap.load_daily, rec.gap.fetch_daily = (lambda s: files.get(s)), fake_fetch
+    try:
+        row = rec.gapper_row("JAGX", date(2026, 11, 24), 6.79, 6.118, "long")
+        assert calls == [True] and row is not None and abs(row["gap_pct"] - 10.98) < 0.01, (calls, row)
+        files["JAGX"] = stale
+        calls.clear()
+        rec.gap.fetch_daily = lambda s, a, b, force=False: calls.append(force) or 0      # download keeps failing
+        assert rec.gapper_row("JAGX", date(2026, 11, 24), 6.79, 6.118, "long") is None   # skipped, not a fake gap
+    finally:
+        rec.gap.load_daily, rec.gap.fetch_daily = saved
+
+
 if __name__ == "__main__":
     tests =[(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

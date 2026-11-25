@@ -98,11 +98,13 @@ def _daily_path(sym: str):
     return DAILY_DIR / f"{sym}.parquet"
 
 
-def fetch_daily(sym: str, start: date, end: date) -> int:
+def fetch_daily(sym: str, start: date, end: date, force: bool = False) -> int:
+    """Forward-adjusted daily bars into data/daily. force=True re-downloads even a recent-looking file
+    (needed after a split: the old file's prices are on the old share basis)."""
     from longport.openapi import AdjustType, Period
     import dt_broker as broker
     p = _daily_path(sym)
-    if p.exists():
+    if p.exists() and not force:
         old = pd.read_parquet(p)
         if len(old) and pd.Timestamp(old.index.max()).date() >= end - timedelta(days=4) \
                 and pd.Timestamp(old.index.min()).date() <= start + timedelta(days=7):

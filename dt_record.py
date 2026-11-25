@@ -53,33 +53,58 @@ def todays_gappers(day) -> pd.DataFrame:
     df = df[((df.side == "long") & (df.open >= cfg.LONG_MIN_PRICE)) | ((df.side == "short") & (df.open >= cfg.SHORT_MIN_PRICE))]
     out = []
     for r in df.itertuples():
-        d = gap.load_daily(r.symbol)
-        if d is None:
-            gap.fetch_daily(r.symbol, day - pd.Timedelta(days=60), day)   # quota-free
-            d = gap.load_daily(r.symbol)
-        if d is None:
-            continue
-        f = gap.daily_features(d[d.index < day])
-        if len(f) < 10:
-            continue
-        last = f.iloc[-1]
-        vol = d[d.index < day]["volume"].tail(20)
-        adv = float(vol.mean())
-        if adv < cfg.MIN_AVG_DAILY_VOLUME:
-            continue
-        dv = float((d[d.index < day]["volume"] * d[d.index < day]["close"]).tail(20).mean())
-        atr = float(bars.atr(d[d.index < day].assign(volume=0), cfg.DAILY_ATR_LEN).iloc[-1])
-        g_adj = (r.open / last.close - 1) * 100          # vs split-adjusted close: a split is not a gap
-        if abs(g_adj) < cfg.MIN_GAP_PCT or (g_adj > 0) != (r.side == "long"):
-            continue
-        out.append({"date": day, "symbol": r.symbol, "side": r.side, "gap_pct": round(g_adj, 2),
-                    "open_adj": r.open, "prev_close_adj": last.close, "atr14_adj": atr, "adv20": adv,
-                    "dollar_vol20": dv, "score": abs(r.gap_pct) * dv})
+        row = gapper_row(r.symbol, day, r.open, r.prev_close, r.side)
+        if row is not None:
+            out.append(row)
     g = pd.DataFrame(out)
     if g.empty:
         return g
     return (g.sort_values("score", ascending=False).groupby("side", group_keys=False).head(cfg.MAX_WATCHLIST)
              .reset_index(drop=True))
+
+
+PREV_CLOSE_TOL = 0.005      # saved daily close vs Longbridge's previous close: more apart = stale / split
+
+
+def fresh_daily(sym: str, day, prev_close: float | None) -> pd.DataFrame | None:
+    """Daily bars before `day` whose last close is Longbridge's previous close. 2026-11-25: the recorder
+    reused whatever was in data/daily - JAGX's file stopped on 16 Nov, before a 1:15 reverse split
+    (recorded gap +1,657% instead of +11%), and several 17-19 Nov rows used a close days old."""
+    for force in (False, True):
+        if force or gap.load_daily(sym) is None:
+            gap.fetch_daily(sym, day - pd.Timedelta(days=60), day, force=force)      # quota-free
+        d = gap.load_daily(sym)
+        if d is None:
+            return None
+        before = d[d.index < day]
+        if len(before) and (prev_close is None or abs(before.close.iloc[-1] / prev_close - 1) <= PREV_CLOSE_TOL):
+            return d
+    print(f"  {sym}: daily close {before.close.iloc[-1] if len(before) else None} still differs from the "
+          f"previous close {prev_close} after a fresh download - skipped")
+    return None
+
+
+def gapper_row(sym: str, day, open_px: float, prev_close: float | None, side: str) -> dict | None:
+    """One gappers.csv row (adjusted daily units) or None if it fails the gap / volume rules."""
+    d = fresh_daily(sym, day, prev_close)
+    if d is None:
+        return None
+    before = d[d.index < day]
+    f = gap.daily_features(before)
+    if len(f) < 10:
+        return None
+    last = f.iloc[-1]
+    adv = float(before["volume"].tail(20).mean())
+    if adv < cfg.MIN_AVG_DAILY_VOLUME:
+        return None
+    dv = float((before["volume"] * before["close"]).tail(20).mean())
+    atr = float(bars.atr(before.assign(volume=0), cfg.DAILY_ATR_LEN).iloc[-1])
+    g_adj = (open_px / last.close - 1) * 100             # vs split-adjusted close: a split is not a gap
+    if abs(g_adj) < cfg.MIN_GAP_PCT or (g_adj > 0) != (side == "long"):
+        return None
+    return {"date": day, "symbol": sym, "side": side, "gap_pct": round(g_adj, 2), "open_adj": open_px,
+            "prev_close_adj": float(last.close), "atr14_adj": atr, "adv20": adv, "dollar_vol20": dv,
+            "score": abs(g_adj) * dv}
 
 
 def save_today_minutes(sym: str, day) -> int:

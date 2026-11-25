@@ -273,3 +273,17 @@ Correction: lbpaper sizes on min(ACCOUNT_SIZE, net assets) = $10,000, so about $
 Follow-up (user's choices, 2026-11-25): the saved runner mode stays `lbpaper`; the six never-quoted
 share-class tickers (AKO, AULT, BF, BRK, LGF, MOG) are skipped via EXCLUDE_SYMBOLS (universe 5,815, all
 quoted); Power Ranger skips a stock when any opening-range minute has no bar (32 guard tests).
+
+## 2026-11-25: recorder used stale daily bars - gappers.csv repaired
+
+The nightly recorder reused data/daily files without checking them: JAGX's file stopped on 16 Nov,
+before a 1:15 reverse split, so 24 Nov was recorded as a +1,657% gap (real +11%); on 17-24 Nov many rows
+measured the gap against a close several days old (ADI -5.2% recorded vs -13.4% real, KYMR +39% vs +6.7%,
+SNDK -89% vs -4.7%). Fix: `dt_record.fresh_daily` re-downloads (quota-free) whenever the saved close differs
+from Longbridge's previous close by > 0.5%, and skips the symbol if it still disagrees (guard test, 33/33).
+Repair: all 143 recorder rows since 17 Nov recomputed from fresh adjusted daily bars - 75 corrected,
+JAGX dropped (adjusted volume < 500k after the split); 24 Nov re-recorded while its minutes were still in
+Longbridge's 1,000-bar window (33 gappers, adds AMD, TXN, KLAC, MCHP, ON, STM ...); 7 old identical
+duplicate rows (share-class tickers counted twice in the first build) removed. Backup:
+data/gappers.csv.before_repair_2026-11-25. Rows 17-23 Nov keep their saved symbols only (true gappers the
+old recorder missed on those days have no minutes and cannot be added).
