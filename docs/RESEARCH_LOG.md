@@ -287,3 +287,15 @@ Longbridge's 1,000-bar window (33 gappers, adds AMD, TXN, KLAC, MCHP, ON, STM ..
 duplicate rows (share-class tickers counted twice in the first build) removed. Backup:
 data/gappers.csv.before_repair_2026-11-25. Rows 17-23 Nov keep their saved symbols only (true gappers the
 old recorder missed on those days have no minutes and cannot be added).
+
+## 2026-11-25 (first lbpaper session): runner started pre-open detected nothing - restarted
+
+The 22:10 SGT runner (started 09:10 ET) processed bars (bar_check lines 09:30-09:44) but logged NO setup at
+all, while the same day's bars give 7 Power Ranger setups offline and through the live engine in every
+sandbox test (warm-up path, push path, opening-candle check path). Root cause not yet seen; suspect a bar
+stamped later than the real ones at subscription/open, which would make every later bar a "duplicate".
+The 09:30 pushed candles WERE bad again (SPY high 718.78 vs 703.70, AMAT 323.76 vs 302.11: the previous
+close folded in) - the history replacement handled them. Restarted 23:18 SGT (10:18 ET): warm-up 1,344
+bars, bars arriving, 0 duplicates. Added: a status line every 5 min (bars, setups, duplicates dropped,
+queue), every setup printed, the first 5 dropped bars printed with timestamps, and future-stamped bars
+ignored. Next pre-open start: read those lines in logs/runner.log.

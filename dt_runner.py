@@ -31,6 +31,7 @@ from dt_sim import Sim
 from dt_strategies import DETECTORS, Setup, timeframe
 
 HEARTBEAT_S = 15
+DIAG_EVERY_S = 300            # status line in the runner log every 5 minutes
 POLL_S = 2
 # 2026-11-24: the FIRST pushed 1-minute candle of the session reached back to the previous close
 # (19 of 20 Power Ranger opening ranges spanned the whole gap -> 10-20% stops), while Longbridge's
@@ -161,8 +162,15 @@ class Engine:
         self.rs.on_bar(sym, o, c)
         if sym == self.rs.bench and sym not in self.watch:
             return []                                    # benchmark: only feeds the RS line
+        if ts > pd.Timestamp.now(tz="UTC") + pd.Timedelta(minutes=2):
+            print(f"IGNORED future-stamped bar {sym} {ts.tz_convert(cfg.TZ):%Y-%m-%d %H:%M} ET", flush=True)
+            return []                                    # must never become last_ts (it would block every real bar)
         st = self._sym(sym)
         if st["last_ts"] is not None and ts <= st["last_ts"]:
+            self.dropped = getattr(self, "dropped", 0) + 1
+            if self.dropped <= 5:
+                print(f"dropped bar {sym} {ts.tz_convert(cfg.TZ):%H:%M} ET (last bar {st['last_ts'].tz_convert(cfg.TZ):%H:%M})",
+                      flush=True)
             return []                                    # duplicate push
         st["last_ts"] = ts
         if trade and self.sim is not None:
@@ -196,7 +204,17 @@ class Engine:
                     out.append(s)
         return out
 
+    def status_line(self) -> str:
+        """One line for the runner log: is the engine actually getting bars?"""
+        n = {s: len(st["frames"].get(1, [])) for s, st in self.state.items()}
+        last = max((st["last_ts"] for st in self.state.values() if st["last_ts"] is not None), default=None)
+        return (f"bars in engine: {sum(n.values())} over {len(n)} symbols (fewest {min(n.values(), default=0)}), "
+                f"latest bar {last.tz_convert(cfg.TZ):%H:%M} ET" if last is not None else "no bars in engine yet") + \
+               f"; setups so far {len(self.setups)}; duplicates dropped {getattr(self, 'dropped', 0)}"
+
     def _publish(self, s: Setup) -> None:
+        print(f"SETUP {s.symbol} {s.strategy} {s.side} trigger {s.trigger:.2f} stop {s.stop:.2f} "
+              f"target {s.target:.2f} ready {s.ready_time.tz_convert(cfg.TZ):%H:%M} ET ({s.reason})", flush=True)
         if self.sim is not None:
             self.sim.add_setup(s)
         if self.ex is not None:
@@ -407,6 +425,7 @@ def run_live(mode: str, minutes: int | None = None) -> None:
         for r in df.itertuples():
             eng.on_bar(s, r.Index, r.open, r.high, r.low, r.close, r.volume, trade=False)
     eng.live_from = now
+    print(f"warm-up done: {eng.status_line()}", flush=True)
 
     pace = Pacer(VERIFY_CALL_GAP_S)
 
@@ -436,6 +455,7 @@ def run_live(mode: str, minutes: int | None = None) -> None:
     stop_at = time.time() + minutes * 60 if minutes else None
     prices: dict[str, float] = {}
     last_beat = last_poll = 0.0
+    last_diag = time.time() - DIAG_EVERY_S + 30     # first status line 30 s after start
     settled_minute = None                                 # opening minutes: wait once per minute for the history
     guard = ErrorGuard(mode, notify)
     _, flat_t, _ = bars.session_times(day)
@@ -477,6 +497,9 @@ def run_live(mode: str, minutes: int | None = None) -> None:
                 guard.run("order check", executor.poll, now)
                 guard.run("save state", lambda: store.save_state(executor.to_state()))
                 last_poll = time.time()
+            if time.time() - last_diag >= DIAG_EVERY_S:
+                print(f"[{pd.Timestamp.now(tz=cfg.TZ):%H:%M} ET] {eng.status_line()}; queue {q.qsize()}", flush=True)
+                last_diag = time.time()
             if time.time() - last_beat >= HEARTBEAT_S:
                 guard.run("heartbeat", lambda: store.write_runner_status(
                     {"pid": os.getpid(), "beat": time.time(), "mode": mode, "symbols": syms, "time": store.now_iso(),
