@@ -11,7 +11,7 @@ Started 2026-11-17. The research workspace it came from is `..\Iris` (see `Iris\
 ## Run order
 
 ```
-.venv\Scripts\python.exe test_dt.py                       guard tests (31), run after every change
+.venv\Scripts\python.exe test_dt.py                       guard tests (32), run after every change
 .venv\Scripts\python.exe dt_data.py --import-iris         old Iris IBKR minute data -> data/bars
 .venv\Scripts\python.exe dt_gappers.py --months 12          every 4%+ gap day of the last year (+ minutes, quota-limited)
 .venv\Scripts\python.exe dt_record.py                     EVERY EVENING after 16:05 ET: save today's gappers' minutes (free)

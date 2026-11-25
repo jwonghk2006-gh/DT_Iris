@@ -85,6 +85,14 @@ def build_universe(refresh: bool = False) -> pd.DataFrame:
     return df
 
 
+def tradable_symbols(uni: pd.DataFrame | None = None) -> list[str]:
+    """Universe symbols the scanner and recorder use: `keep` rows (each once), minus EXCLUDE_SYMBOLS.
+    Share classes were stored without their suffix (BRK.B -> BRK). Most such tickers still quote (the main
+    class), but six never do; they are in EXCLUDE_SYMBOLS and skipped (the user's choice, 2026-11-25)."""
+    uni = build_universe() if uni is None else uni
+    return sorted(set(uni[uni["keep"]]["symbol"].astype(str)) - set(cfg.EXCLUDE_SYMBOLS))
+
+
 # ------------------------------------------------------------------ 2. daily bars
 def _daily_path(sym: str):
     return DAILY_DIR / f"{sym}.parquet"

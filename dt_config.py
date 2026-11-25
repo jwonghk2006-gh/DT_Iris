@@ -50,7 +50,8 @@ PREMARKET_VOL_MIN_PRICE_LT_5 = 1_000_000
 MAX_WATCHLIST = 20           # per side, ranked by premarket change % x premarket volume
 SCAN_TIME = "09:00"          # scheduled scan: the watchlist is built and locked at this New York time
 SCAN_LATEST = "09:25"        # a scheduled scan that starts later than this does nothing (too close to the open)
-EXCLUDE_SYMBOLS: list[str] = []   # ADRs or names you never want to trade
+EXCLUDE_SYMBOLS: list[str] = ["AKO", "AULT", "BF", "BRK", "LGF", "MOG"]   # never quoted (share classes stored without
+                                                                          # their suffix); add names you never want
 BENCHMARKS = ["SPY", "QQQ"]
 
 # ------------------------------------------------------------------ relative strength / weakness (added 2026-11-23)

@@ -32,8 +32,7 @@ import dt_gappers as gap
 def todays_gappers(day) -> pd.DataFrame:
     import dt_broker as broker
     ctx = broker.quote_context()
-    uni = gap.build_universe()
-    syms = sorted(uni[uni["keep"]]["symbol"])
+    syms = gap.tradable_symbols()
     rows = []
     for k in range(0, len(syms), 400):
         for q in ctx.quote([broker.lb_symbol(s) for s in syms[k:k + 400]]):

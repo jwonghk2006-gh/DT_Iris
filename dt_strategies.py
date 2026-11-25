@@ -100,6 +100,11 @@ def power_ranger(symbol, df, i, ctx, memo, params=None):
     if i != k - 1 or len(df) < k:
         return []
     rng = df.iloc[:k]
+    t = rng.index.tz_convert(cfg.TZ)
+    mins = t.hour * 60 + t.minute
+    want = bars.OPEN_T.hour * 60 + bars.OPEN_T.minute + np.arange(k) * p["timeframe_min"]
+    if len(mins) != k or not (np.asarray(mins) == want).all():
+        return []                     # an opening minute had no trades: skip the stock (the user's choice, 2026-11-25)
     gap = ctx.basis_gap_pct if ctx is not None and ctx.basis_gap_pct is not None else None
     if gap is None and ctx is not None and ctx.prev_close:
         gap = (rng.open.iloc[0] / ctx.prev_close - 1) * 100

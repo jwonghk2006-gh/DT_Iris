@@ -139,10 +139,10 @@ def rank(rows: list[dict], day: date) -> pd.DataFrame:
 
 
 def universe_symbols() -> list[str]:
-    """Every tradable common stock in the Longbridge universe file (built once by dt_gappers)."""
+    """Every tradable common stock in the Longbridge universe file (built once by dt_gappers),
+    without share classes and EXCLUDE_SYMBOLS."""
     import dt_gappers as gap
-    uni = gap.build_universe()
-    return sorted(uni[uni["keep"]]["symbol"].astype(str))
+    return gap.tradable_symbols()
 
 
 def avg_daily_volume(sym: str, day: date) -> float | None:

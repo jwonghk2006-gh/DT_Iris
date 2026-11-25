@@ -270,3 +270,6 @@ Fixed (31 guard tests, all pass):
 Not fixed (small): `run_live` saves the mode it ran in as the default; dotted share classes (BRK.B) are
 never quoted; Power Ranger's opening range counts 5 bars, not 5 minutes, for stocks with an empty minute.
 Correction: lbpaper sizes on min(ACCOUNT_SIZE, net assets) = $10,000, so about $100 risk a trade.
+Follow-up (user's choices, 2026-11-25): the saved runner mode stays `lbpaper`; the six never-quoted
+share-class tickers (AKO, AULT, BF, BRK, LGF, MOG) are skipped via EXCLUDE_SYMBOLS (universe 5,815, all
+quoted); Power Ranger skips a stock when any opening-range minute has no bar (32 guard tests).

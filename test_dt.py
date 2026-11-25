@@ -622,6 +622,20 @@ def test_executor_partial_exit_fills_are_counted():
     assert int(t["shares"]) == n and abs(t["pnl"] - round(exp_gross - exp_costs, 2)) < 0.011, (t["pnl"], exp_gross - exp_costs)
 
 
+def test_power_ranger_skips_missing_opening_minute():
+    """A thin stock with no trade in one of the first 5 minutes: no Power Ranger setup (the range would
+    otherwise reach past 09:34). Same bars with every minute present still find the setup."""
+    from dt_strategies import power_ranger
+    ctx = bars.DayContext("TST", DAY.date(), 9.0, 50_000, 10.0, 1.0, None)          # +11% gap, ATR 1.0
+    rows = [(10.0, 10.2, 9.9, 10.1, 1000), (10.1, 10.25, 10.0, 10.2, 1000), (10.2, 10.3, 10.1, 10.25, 1000),
+            (10.25, 10.3, 10.15, 10.28, 1000), (10.28, 10.32, 10.2, 10.3, 1000)]
+    full = bars.add_indicators(frame(rows))
+    assert power_ranger("TST", full, 4, ctx, {}), "control: complete opening range should give a setup"
+    gappy = frame(rows + [(10.3, 10.35, 10.25, 10.33, 1000)]).drop(index=minute(2))   # 09:32 missing
+    gappy = bars.add_indicators(gappy)
+    assert power_ranger("TST", gappy, 4, ctx, {}) == []
+
+
 if __name__ == "__main__":
     tests =[(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

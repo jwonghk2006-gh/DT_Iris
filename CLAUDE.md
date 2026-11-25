@@ -22,6 +22,7 @@ Tug-Of-War). `dt_rs.py` holds the relative-strength maths; `GAP_BASIS = "raw"` i
 Tested 2026-11-24 (`research_rs.py`, 5 years): FAIL for Power Ranger, Cupid, Tug-Of-War - they lose less but
 still lose; paper only. The follow-up "trade with RS" test (`research_rs_lead.py`) also FAILED
 (-58.8R on validate): RS works as a loss-reducing filter, not as an edge. See RESEARCH_LOG.
+Saved runner mode (store/runner_settings.json) is `lbpaper` - the user's choice (2026-11-25): keep it, do not reset to paper.
 The dashboard is `run_dashboard.bat` -> http://localhost:8518 (Streamlit). The runner (`dt_runner.py`) is NOT scheduled,
 except a ONE-OFF task "DT_Iris lbpaper runner (tonight)" the user approved for 25 Nov 2026 22:10 SGT
 (`run_runner_lbpaper.bat`, log `logs/runner.log`; first ever orders to the Longbridge demo account; task deletes itself).
@@ -49,7 +50,7 @@ except a ONE-OFF task "DT_Iris lbpaper runner (tonight)" the user approved for 2
   with the candle history (logged as `bar_check` in activity). Check `bar_check` lines after a live session.
 - `quote()` can silently leave symbols out of its reply (23 Nov: 267 of 5,842, incl. AMD, TSM, DELL).
   `dt_scanner._quote_batch` re-asks for missing ones; scan.log lists any still missing (6 dotted share classes
-  such as BRK.B / BF.B always are: lb_symbol does not map them).
+  such as BRK.B / BF.B) - now skipped via EXCLUDE_SYMBOLS (user's choice).
 
 ## Dashboard look (the user's choice)
 Light blue sidebar `#dcecf8`, very light grey page `#f4f5f7`, default text 1.5x with a slider,
