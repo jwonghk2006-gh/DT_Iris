@@ -99,7 +99,7 @@ def power_ranger(symbol, df, i, ctx, memo, params=None):
     if i != k - 1 or len(df) < k:
         return []
     rng = df.iloc[:k]
-    gap = ctx.gap_pct if ctx is not None and ctx.gap_pct is not None else None
+    gap = ctx.basis_gap_pct if ctx is not None and ctx.basis_gap_pct is not None else None
     if gap is None and ctx is not None and ctx.prev_close:
         gap = (rng.open.iloc[0] / ctx.prev_close - 1) * 100
     if gap is None:

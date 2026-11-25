@@ -30,6 +30,11 @@ Where it stands (2026-11-21):
   its pre-declared bar: +0.49%/trade net, beat 99/99 random. BUT the 10-slot portfolio made
   +7.6%/yr (Sharpe 0.45) vs SPY +18.8% (Sharpe 1.15): worse than holding the index. Next
   candidates: holdout check (pass bar first) and a SPY-hedged version.
+- 2026-11-23: the scanner now makes a GAP list on the gap RELATIVE to SPY (stock gap - beta x SPY
+  gap; Power Ranger, Roller Coaster) and an IN-PLAY list on pre-market relative volume (Cupid,
+  Tug-Of-War); the runner adds intraday RS vs SPY to alerts. Tested 2026-11-24 (research_rs.py):
+  FAIL for all three; relative gap and the RS filter reduce losses but leave no edge.
+  Follow-up research_rs_lead.py (enter WITH RS at 10:00-11:00) also FAIL: -58.8R validate, 5/99.
 - Paper trading runs for fun/learning only (first day 2026-11-20: 2 trades, +0.79R).
 - The runner (dt_runner.py) is NOT scheduled and must not trade real money. Live order path
   never tested on the Longbridge demo account. Known risks: stop watched locally (no broker
@@ -42,7 +47,7 @@ Rules for working with me:
   once; do not tune until it passes (I lost money with an over-fitted grid-search system, AQS).
 - A result counts only if it beats the random-entry noise check and survives realistic costs
   (1 cent slippage per fill + $0.005/share commission).
-- Run test_dt.py after code changes (21 tests). Never print or copy secrets from .env.
+- Run test_dt.py after code changes (25 tests). Never print or copy secrets from .env.
 - Do not place orders or start the runner in lbpaper/live mode without my explicit OK.
 - Longbridge quirk: before the open, quote().prev_close is TWO sessions old; use
   pre_market_quote.prev_close (already split-adjusted). The scanner does this since 2026-11-20.

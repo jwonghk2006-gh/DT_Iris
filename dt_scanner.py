@@ -10,12 +10,17 @@ ETF/ETN/fund/ADR/warrant; built by dt_gappers.build_universe). Quotes are pulled
 400 (a few seconds for the whole market). Average daily volume comes from data/daily, refreshed
 with the quota-free latest-bars call - the scan never touches the 400-symbol history quota.
 
-Filters (dt_config, from the course notes):
-    long watch  : premarket change >= +MIN_GAP_PCT and price >= LONG_MIN_PRICE
-    short watch : premarket change <= -MIN_GAP_PCT and price >= SHORT_MIN_PRICE
-    premarket volume >= 5,000 (price >= $5) or >= 1,000,000 (price < $5)
-    average daily volume >= MIN_AVG_DAILY_VOLUME
-Ranked by |gap %| x premarket volume; top MAX_WATCHLIST per side.
+Two lists, one row per symbol (column `lists`), see dt_config:
+    gap      (Power Ranger, Roller Coaster): |relative gap| >= MIN_GAP_PCT, where relative gap =
+             stock gap - beta x SPY gap (GAP_BASIS "relative"; "raw" = the plain gap). The sign gives
+             the side: relative strength -> long (price >= LONG_MIN_PRICE), relative weakness -> short
+             (price >= SHORT_MIN_PRICE). Premarket volume >= 5,000 (price >= $5) or >= 1,000,000 (< $5),
+             average daily volume >= MIN_AVG_DAILY_VOLUME. Ranked by |gap| x premarket volume, top
+             MAX_WATCHLIST per side.
+    in_play  (Cupid, Tug-Of-War): no gap needed. Price >= IN_PLAY_MIN_PRICE, average daily volume >=
+             IN_PLAY_MIN_ADV, premarket volume >= IN_PLAY_MIN_PM_VOLUME and >= IN_PLAY_MIN_PM_RVOL of a
+             normal day. Side = sign of the relative gap. Ranked by pm_rvol, top IN_PLAY_MAX.
+Every candidate also gets its best-matching sector ETF and the gap relative to it (information).
 Writes data/watchlists/<NY date>.csv, which the runner reads at the open. A scheduled scan
 writes it once and marks it locked; it does not overwrite a list that is already locked.
 """
@@ -32,7 +37,8 @@ import pandas as pd
 
 import dt_config as cfg
 
-COLS = ["date", "symbol", "side", "price", "prev_close", "gap_pct", "premarket_volume", "avg_daily_volume", "score", "note"]
+COLS = ["date", "symbol", "side", "lists", "price", "prev_close", "gap_pct", "spy_gap", "beta", "rel_gap", "sector",
+        "sector_gap", "premarket_volume", "avg_daily_volume", "pm_rvol", "score", "note"]
 BATCH = 400
 
 
@@ -40,9 +46,18 @@ def premarket_min_volume(price: float) -> float:
     return cfg.PREMARKET_VOL_MIN_PRICE_GE_5 if price >= 5 else cfg.PREMARKET_VOL_MIN_PRICE_LT_5
 
 
+def basis_gap(row: dict) -> float | None:
+    """The gap the gap list is judged on: relative to SPY (default) or raw."""
+    if cfg.GAP_BASIS == "relative" and row.get("rel_gap") is not None:
+        return row["rel_gap"]
+    return row.get("gap_pct")
+
+
 def classify(row: dict) -> tuple[str | None, str]:
-    """Return (side, note) for one candidate, side None if it fails a filter."""
-    sym, px, gap, pmv, adv = row["symbol"], row["price"], row["gap_pct"], row["premarket_volume"], row.get("avg_daily_volume")
+    """Gap list: return (side, note) for one candidate, side None if it fails a filter."""
+    sym, px, pmv, adv = row["symbol"], row["price"], row["premarket_volume"], row.get("avg_daily_volume")
+    gap = basis_gap(row)
+    what = "rel gap" if cfg.GAP_BASIS == "relative" and row.get("rel_gap") is not None else "gap"
     if sym in cfg.EXCLUDE_SYMBOLS:
         return None, "excluded"
     if gap is None or px is None:
@@ -56,22 +71,71 @@ def classify(row: dict) -> tuple[str | None, str]:
         return ("long", ok) if px >= cfg.LONG_MIN_PRICE else (None, f"long below ${cfg.LONG_MIN_PRICE:g}")
     if gap <= -cfg.MIN_GAP_PCT:
         return ("short", ok) if px >= cfg.SHORT_MIN_PRICE else (None, f"short below ${cfg.SHORT_MIN_PRICE:g}")
-    return None, f"gap {gap:+.1f}% too small" + (f" ({row['split']})" if row.get("split") else "")
+    return None, f"{what} {gap:+.1f}% too small" + (f" ({row['split']})" if row.get("split") else "")
+
+
+def in_play_candidate(row: dict) -> bool:
+    px = row.get("price")
+    return bool(px and px >= cfg.IN_PLAY_MIN_PRICE and (row.get("premarket_volume") or 0) >= cfg.IN_PLAY_MIN_PM_VOLUME)
+
+
+def in_play(row: dict) -> tuple[str | None, str]:
+    """Stocks-in-play list: return (side, note); side None if it fails."""
+    sym, px, adv, rv = row["symbol"], row.get("price"), row.get("avg_daily_volume"), row.get("pm_rvol")
+    if sym in cfg.EXCLUDE_SYMBOLS:
+        return None, "excluded"
+    if not in_play_candidate(row):
+        return None, "in play: price or premarket volume too low"
+    if adv is None or adv != adv or adv < cfg.IN_PLAY_MIN_ADV:
+        return None, "in play: average daily volume too low"
+    if rv is None or rv < cfg.IN_PLAY_MIN_PM_RVOL:
+        return None, f"in play: premarket volume {0 if rv is None else rv:.1%} of a day, too low"
+    g = basis_gap(row)
+    side = "long" if (g or 0) >= 0 else "short"
+    if side == "short" and px < cfg.SHORT_MIN_PRICE:
+        return None, f"in play: short below ${cfg.SHORT_MIN_PRICE:g}"
+    return side, f"in play: premarket volume {rv:.0%} of a day"
 
 
 def rank(rows: list[dict], day: date) -> pd.DataFrame:
     out = []
     for r in rows:
-        side, note = classify(r)
-        r = dict(r, date=str(day), side=side or "", note=note)
-        r["score"] = abs(r["gap_pct"] or 0) * (r["premarket_volume"] or 0) if side else 0
-        out.append(r)
-    df = pd.DataFrame(out, columns=COLS)
-    keep = []
+        gside, gnote = classify(r)
+        iside, inote = in_play(r)
+        out.append(dict(r, date=str(day), _gside=gside or "", _gnote=gnote, _iside=iside or "", _inote=inote,
+                        _gscore=abs(basis_gap(r) or 0) * (r["premarket_volume"] or 0) if gside else 0.0,
+                        _iscore=(r.get("pm_rvol") or 0.0) if iside else 0.0))
+    df = pd.DataFrame(out)
+    if df.empty:
+        return pd.DataFrame(columns=COLS)
+    gap_keep = set()
     for side in ("long", "short"):
-        keep.append(df[df.side == side].sort_values("score", ascending=False).head(cfg.MAX_WATCHLIST))
-    rejected = df[df.side == ""]
-    return pd.concat(keep + [rejected], ignore_index=True)
+        gap_keep |= set(df[df._gside == side].sort_values("_gscore", ascending=False).head(cfg.MAX_WATCHLIST).index)
+    play_keep = set(df[df._iside != ""].sort_values("_iscore", ascending=False).head(cfg.IN_PLAY_MAX).index)
+    sides, lists, notes, scores = [], [], [], []
+    for i, r in df.iterrows():
+        on = [n for n, keep in (("gap", i in gap_keep), ("in_play", i in play_keep)) if keep]
+        lists.append(",".join(on))
+        sides.append(r._gside if i in gap_keep else (r._iside if i in play_keep else ""))
+        scores.append(r._gscore if i in gap_keep else (r._iscore if i in play_keep else 0.0))
+        if on:
+            notes.append("; ".join(([r._gnote] if i in gap_keep else []) + ([r._inote] if i in play_keep else [])))
+        else:
+            cut = []
+            if r._gside:
+                cut.append(f"gap ok but below the top {cfg.MAX_WATCHLIST}")
+            if r._iside:
+                cut.append(f"in play ok but below the top {cfg.IN_PLAY_MAX}")
+            notes.append("; ".join(cut) or r._gnote + ("" if r._inote.startswith("in play: price") else f"; {r._inote}"))
+    df["side"], df["lists"], df["note"], df["score"] = sides, lists, notes, scores
+    for c in COLS:
+        if c not in df:
+            df[c] = None
+    df = df[COLS]
+    kept = df[df.side != ""].copy()
+    kept["_o"] = kept["lists"].map(lambda x: 0 if "gap" in x.split(",") else 1)
+    kept = kept.sort_values(["_o", "side", "score"], ascending=[True, True, False]).drop(columns="_o")
+    return pd.concat([kept, df[df.side == ""]], ignore_index=True)
 
 
 def universe_symbols() -> list[str]:
@@ -97,12 +161,9 @@ def avg_daily_volume(sym: str, day: date) -> float | None:
     return float(vol.mean()) if len(vol) >= 10 else None
 
 
-def scan_longbridge(symbols: list[str], day: date | None = None, with_adv: bool = True,
-                    log=print) -> tuple[list[dict], int]:
-    """Quote every symbol; returns (rows, number with a premarket quote from `day`)."""
+def _quote(ctx, symbols: list[str], day: date, log=print) -> tuple[list[dict], int]:
+    """Premarket quote rows for `symbols`; returns (rows, number with a premarket quote from `day`)."""
     import dt_broker as broker
-    day = day or ny_today()
-    ctx = broker.quote_context()
     rows, live = [], 0
     for k in range(0, len(symbols), BATCH):
         chunk = [broker.lb_symbol(s) for s in symbols[k:k + BATCH]]
@@ -133,11 +194,59 @@ def scan_longbridge(symbols: list[str], day: date | None = None, with_adv: bool 
             rows.append({"symbol": broker.plain(q.symbol), "price": px, "prev_close": prev, "gap_pct": gap,
                          "premarket_volume": pmv, "avg_daily_volume": None, "split": split})
         time.sleep(0.12)                                  # Longbridge allows about 10 quote calls a second
+    return rows, live
+
+
+def enrich(rows: list[dict], day: date, bench_gaps: dict, log=print) -> None:
+    """Adds spy_gap, beta, rel_gap, sector, sector_gap, avg_daily_volume and pm_rvol to every candidate
+    of either list (in place). Uses daily bars before `day` only (quota-free fetch when missing)."""
+    import dt_rs as rs
+    spy = bench_gaps.get(cfg.RS_BENCHMARK)
+    if spy is None:
+        log(f"no premarket quote for {cfg.RS_BENCHMARK}: relative gaps fall back to the raw gap")
+    bench_c = rs.daily_closes(cfg.RS_BENCHMARK, day)
+    etf_c = {}
+    for e in cfg.SECTOR_ETFS:
+        c = rs.daily_closes(e, day)
+        if c is not None:
+            etf_c[e] = c
+    for r in rows:
+        r["spy_gap"] = None if spy is None else round(spy, 2)
+        g = rs.rel_gap(r["gap_pct"], spy, None)          # beta 1 until (and unless) the real beta is computed
+        r["rel_gap"] = None if g is None else round(g, 2)
+    thr = cfg.MIN_GAP_PCT
+    cands = [r for r in rows if r["gap_pct"] is not None and (
+        (r["premarket_volume"] >= premarket_min_volume(r["price"])
+         and (rs.could_pass(r["gap_pct"], spy, thr) if cfg.GAP_BASIS == "relative" else abs(r["gap_pct"]) >= thr))
+        or in_play_candidate(r))]
+    for r in cands:
+        closes = rs.daily_closes(r["symbol"], day)        # first: fetches enough days for beta too
+        r["avg_daily_volume"] = avg_daily_volume(r["symbol"], day)
+        if r["avg_daily_volume"]:
+            r["pm_rvol"] = round(r["premarket_volume"] / r["avg_daily_volume"], 4)
+        if closes is None:
+            continue
+        b = rs.beta(closes, bench_c) if bench_c is not None else None
+        r["beta"] = None if b is None else round(b, 2)
+        g = rs.rel_gap(r["gap_pct"], spy, b)
+        r["rel_gap"] = None if g is None else round(g, 2)
+        etf, corr, sb = rs.best_sector(closes, etf_c)
+        if etf:
+            r["sector"] = f"{etf} ({corr:.2f})"
+            sg = rs.rel_gap(r["gap_pct"], bench_gaps.get(etf), sb)
+            r["sector_gap"] = None if sg is None else round(sg, 2)
+
+
+def scan_longbridge(symbols: list[str], day: date | None = None, with_adv: bool = True,
+                    log=print) -> tuple[list[dict], int]:
+    """Quote every symbol (+ SPY and the sector ETFs); returns (rows, number with a premarket quote from `day`)."""
+    import dt_broker as broker
+    day = day or ny_today()
+    ctx = broker.quote_context()
+    rows, live = _quote(ctx, symbols, day, log)
     if with_adv:
-        cands = [r for r in rows if r["gap_pct"] is not None and abs(r["gap_pct"]) >= cfg.MIN_GAP_PCT
-                 and r["premarket_volume"] >= premarket_min_volume(r["price"])]
-        for r in cands:
-            r["avg_daily_volume"] = avg_daily_volume(r["symbol"], day)
+        bench_rows, _ = _quote(ctx, [cfg.RS_BENCHMARK] + list(cfg.SECTOR_ETFS), day, log)
+        enrich(rows, day, {r["symbol"]: r["gap_pct"] for r in bench_rows}, log)
     return rows, live
 
 
@@ -196,9 +305,18 @@ def run_scan(symbols: list[str] | None = None, source: str = "auto", lock: bool 
             "with_premarket_quote": live, "long": nl, "short": ns,
             "time_ny": pd.Timestamp.now(tz=cfg.TZ).strftime("%H:%M"), "seconds": round(time.time() - t0, 1)}
     path = save(df, day, meta)
-    log(df[df.side != ""][["symbol", "side", "price", "gap_pct", "premarket_volume", "avg_daily_volume"]].to_string(index=False))
+    shown = df[df.side != ""][["symbol", "lists", "side", "price", "gap_pct", "rel_gap", "beta", "sector", "sector_gap", "pm_rvol"]]
+    log(shown.to_string(index=False))
+    meta["spy_gap"] = None if df.empty else df["spy_gap"].iloc[0]
+    meta["gap_list"] = int(df["lists"].fillna("").str.contains("gap").sum())
+    meta["in_play"] = int(df["lists"].fillna("").str.contains("in_play").sum())
+    save(df, day, meta)
     log(f"{nl} long, {ns} short from {len(syms)} symbols ({live} with a premarket quote) in {meta['seconds']}s -> {path}")
     return meta
+
+
+def _fmt(v, spec: str) -> str:
+    return "n/a" if v is None or v != v else format(v, spec)
 
 
 def notify_watchlist(meta: dict) -> None:
@@ -209,11 +327,25 @@ def notify_watchlist(meta: dict) -> None:
         tg.send(f"DT_Iris scanner: {meta.get('reason')}")
         return
     wl = load_watchlist(date.fromisoformat(meta["date"]))
-    lines = [f"DT_Iris watchlist {meta['date']} (locked {meta['time_ny']} ET): {meta['long']} long, {meta['short']} short"]
+    lists = wl["lists"].fillna("") if "lists" in wl else pd.Series("gap", index=wl.index)
+    lines = [f"DT_Iris watchlist {meta['date']} (locked {meta['time_ny']} ET), "
+             f"SPY {_fmt(meta.get('spy_gap'), '+.2f')}% pre-market"]
+    gap = wl[lists.str.contains("gap")]
+    lines.append("GAP list (Power Ranger, Roller Coaster): gap / relative to SPY")
     for side in ("long", "short"):
-        part = wl[wl.side == side]
+        part = gap[gap.side == side]
         if len(part):
-            lines.append(side.upper() + ": " + ", ".join(f"{r.symbol} {r.gap_pct:+.1f}%" for r in part.itertuples()))
+            lines.append(f"  {side.upper()}: " + ", ".join(
+                f"{r.symbol} {r.gap_pct:+.1f}/{_fmt(getattr(r, 'rel_gap', None), '+.1f')}" for r in part.itertuples()))
+    play = wl[lists.str.contains("in_play")]
+    if len(play):
+        lines.append("IN PLAY (Cupid, Tug-Of-War): pre-market volume as % of a normal day")
+        for side in ("long", "short"):
+            part = play[play.side == side]
+            if len(part):
+                lines.append(f"  {side.upper()}: " + ", ".join(
+                    f"{r.symbol} {_fmt(r.pm_rvol * 100 if r.pm_rvol == r.pm_rvol else None, '.0f')}%"
+                    for r in part.itertuples()))
     tg.send("\n".join(lines))
 
 

@@ -47,6 +47,32 @@ SCAN_LATEST = "09:25"        # a scheduled scan that starts later than this does
 EXCLUDE_SYMBOLS: list[str] = []   # ADRs or names you never want to trade
 BENCHMARKS = ["SPY", "QQQ"]
 
+# ------------------------------------------------------------------ relative strength / weakness (added 2026-11-23)
+# A gap only means something compared with the market: +3% on a day SPY is -1% is strong, +3% on a
+# day SPY is +2% is mostly the market. relative gap = stock gap - beta x SPY gap (beta = how much the
+# stock usually moves with SPY). The sector ETF is picked per stock from the data: the ETF its daily
+# returns correlated with best over BETA_DAYS (Longbridge has no sector field).
+GAP_BASIS = "relative"       # "relative": the gap list uses the relative gap and its sign gives the side;
+                             # "raw": the plain gap, as in every backtest before 2026-11-23
+RS_BENCHMARK = "SPY"
+BETA_DAYS = 60               # daily returns used for beta and the sector match
+BETA_MIN, BETA_MAX = 0.3, 3.0   # beta is clamped to this range (a few wild days must not make it 8)
+SECTOR_ETFS = ["XLK", "SMH", "XLF", "KRE", "XLE", "XLV", "XBI", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC", "ITB"]
+SECTOR_MIN_CORR = 0.5        # below this correlation the stock gets no sector ETF
+
+# ------------------------------------------------------------------ stocks in play (Cupid, Tug-Of-War)
+# Cupid and Tug-Of-War do not need a gap: they watch the stocks trading unusually heavily before the
+# open. pm_rvol = premarket volume / 20-day average daily volume (both from Longbridge, so both
+# Nasdaq-only and comparable). The side is the sign of the relative gap (RS -> long, RW -> short).
+IN_PLAY_MIN_PRICE = 5.0
+IN_PLAY_MIN_ADV = 1_000_000          # liquidity: 20-day average daily volume
+IN_PLAY_MIN_PM_VOLUME = 50_000       # shares traded pre-market
+IN_PLAY_MIN_PM_RVOL = 0.05           # pre-market volume at least 5% of a normal full day
+IN_PLAY_MAX = 20                     # both sides together, ranked by pm_rvol
+# which list feeds which strategy ("gap" = the gap watchlist, "in_play" = the relative-volume list)
+LIST_STRATEGIES = {"gap": ["power_ranger", "roller_coaster", "orb_retest_a", "orb_retest_b"],
+                   "in_play": ["cupid", "tug_of_war"]}
+
 # ------------------------------------------------------------------ indicators
 EMA_LEN = 9                  # 9 EMA on 1, 2 and 5 minute charts
 ATR_LEN = 14                 # intraday ATR on the setup timeframe

@@ -16,7 +16,15 @@ give honest, data-based views.
 |---|---|---|---|
 | DT_Iris pre-market scan | Mon-Fri 20:45, then waits until **09:00 New York** (DST-safe) | `run_scan.bat` -> `dt_scanner.py --scheduled`: scans, locks `data/watchlists/<date>.csv`, posts to Telegram | `logs/scan.log` |
 | DT_Iris nightly recorder | Tue-Sat 06:00 (after the US close) | `run_record.bat` -> `dt_record.py`: saves that day's gappers' 1-minute bars to `data/bars`, appends `data/gappers.csv` | `logs/record.log` |
-The dashboard is `run_dashboard.bat` -> http://localhost:8518 (Streamlit). The runner (`dt_runner.py`) is NOT scheduled.
+Since 2026-11-23 the scan builds TWO lists (column `lists`): **gap** (relative gap = stock gap − beta × SPY gap,
+|≥4%|, feeds Power Ranger / Roller Coaster) and **in_play** (pre-market volume ≥ 5% of a normal day, feeds Cupid /
+Tug-Of-War). `dt_rs.py` holds the relative-strength maths; `GAP_BASIS = "raw"` in dt_config restores the old rule.
+Tested 2026-11-24 (`research_rs.py`, 5 years): FAIL for Power Ranger, Cupid, Tug-Of-War - they lose less but
+still lose; paper only. The follow-up "trade with RS" test (`research_rs_lead.py`) also FAILED
+(-58.8R on validate): RS works as a loss-reducing filter, not as an edge. See RESEARCH_LOG.
+The dashboard is `run_dashboard.bat` -> http://localhost:8518 (Streamlit). The runner (`dt_runner.py`) is NOT scheduled,
+except a ONE-OFF task "DT_Iris lbpaper runner (tonight)" the user approved for 25 Nov 2026 22:10 SGT
+(`run_runner_lbpaper.bat`, log `logs/runner.log`; first ever orders to the Longbridge demo account; task deletes itself).
 
 ## Hard rules
 - Never print, copy or send values from `.env`; only check which names are set.
@@ -34,6 +42,9 @@ The dashboard is `run_dashboard.bat` -> http://localhost:8518 (Streamlit). The r
 - History quota: 400 distinct symbols per period (error 301607). `candlesticks()` (latest 1,000 bars) is quota-free.
 - Before the open, `quote().prev_close` is two sessions old; use `pre_market_quote.prev_close`.
 - US data package is Nasdaq-only: volume is about 55-60% of consolidated volume.
+- The FIRST pushed 1-minute candle of a session can reach back to the previous close (seen 2026-11-24:
+  Power Ranger stops 10-20% wide). `dt_runner.verified_bar` replaces pushed candles in the first 15 minutes
+  with the candle history (logged as `bar_check` in activity). Check `bar_check` lines after a live session.
 
 ## Dashboard look (the user's choice)
 Light blue sidebar `#dcecf8`, very light grey page `#f4f5f7`, default text 1.5x with a slider,

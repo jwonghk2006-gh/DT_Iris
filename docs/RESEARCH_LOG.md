@@ -141,3 +141,97 @@ Power Ranger made +42R in 2022-23 and lost -113R in 2024-26. None has an edge.
 - First rule set to show a real selection effect. Not yet a reason to trade it.
   Possible next steps (each needs its pass bar written first): the holdout check (40 sessions,
   once); a market-hedged version (long the dips, short SPY) that measures the edge on its own.
+
+## 2026-11-23: relative strength / weakness and a "stocks in play" list (live scanner only)
+
+User's point: a gap only means something against the market, and only Power Ranger (and Roller
+Coaster) are gap setups; Cupid and Tug-Of-War need busy stocks, not gaps. Iris's notes agree:
+Power Ranger = "quality gap **or** very good relative strength/weakness"; Cupid = gap is
+"watchlist context, not the trigger" and asks "does it have relative strength or weakness?".
+
+Built (`dt_rs.py`, `dt_scanner.py`, `dt_runner.py`, settings in `dt_config.py`):
+- **relative gap = stock gap - beta x SPY gap**, beta from 60 daily returns, clamped 0.3-3.0.
+  `GAP_BASIS = "relative"`: the gap list needs |relative gap| >= 4% and its sign sets the side
+  (strong -> long, weak -> short). `"raw"` restores the old rule.
+- **Sector**: the ETF (of 15: XLK, SMH, XLF, KRE, XLE, XLV, XBI, ...) whose daily returns
+  correlated best with the stock over 60 days (>= 0.5), and the gap relative to it. Information only.
+- **In-play list** for Cupid and Tug-Of-War: price >= $5, 20-day average volume >= 1M, premarket
+  volume >= 50k shares and >= 5% of a normal day (`pm_rvol`), top 20 by pm_rvol, side = sign of
+  the relative gap. The watchlist CSV has a `lists` column; the runner lets each list feed only
+  its strategies (`LIST_STRATEGIES`).
+- **Intraday RS**: the runner also follows SPY and adds "RS +x% vs SPY" (stock % since the open
+  minus beta x SPY %) to every setup alert and signal. Information only, not a filter yet.
+
+First look, 2026-11-23 08:31 ET, SPY +2.5% pre-market after -3.6% on Friday: 216 stocks with a
+raw gap >= 4% dropped out (their gap was mostly the market); SKM (flat, -5.1% vs SPY) and HDB
+joined the short side; in play: ZS, KYMR, CRWD, ETSY.
+
+**NOT tested.** Every backtest above used raw gaps and the gap list for all strategies. Before
+trusting the relative rules, write a pre-declared test on the Alpaca 5 years (relative-gap list
+vs raw-gap list for Power Ranger; in-play list for Cupid / Tug-Of-War, which needs new minute
+downloads for non-gap stocks), pass bar first.
+
+## 2026-11-24: relative-strength and in-play lists tested (pre-declared, `research_rs.py`) - FAIL
+
+Rules, variants, split and pass bar were written at the top of `research_rs.py` before any run.
+Selection on TRAIN (2021-11 to 2024-06), judged once on VALIDATE (2024-07 to 2026-09).
+Strategy rules and costs unchanged; only the stock list (and an optional intraday RS filter)
+varied. New data: pre-market volume 04:00-09:00 for 2,297 liquid stocks (Alpaca hourly bars),
+SPY 1-minute bars, and minutes for 54,051 list stock-days. Full numbers:
+`results_alpaca/rs_test/report.json`, log `logs/rs_run.log`.
+
+| Strategy | Chosen on train | Validate trades | Validate total R | Baseline (raw-4) validate | Beat random | Verdict |
+|---|---|---|---|---|---|---|
+| Power Ranger | rel gap >= 6%, RS filter off | 912 | -10.7R | -59.1R (1,145 trades) | 91/99 (need 95) | FAIL |
+| Cupid | (no variant reached 100 train trades) raw-4 | 34 | +9.9R | same | 88/99 | FAIL (too few trades) |
+| Tug-Of-War | raw-4 + RS filter | 1,157 | -52.5R | -156.8R (1,397 trades) | 0/99 | FAIL |
+
+What it says (validate numbers are description only, not used to choose):
+- **Relative gap helps Power Ranger, but not enough.** Every relative-gap variant lost less than
+  its raw-gap twin from 5% up (rel-6 -10.7R vs raw-6 -34.4R; rel-5 -37.4R vs raw-5 -65.9R), and
+  rel-6 beat 91 of 99 random entries. Still a loss after costs, so no edge to trade.
+- **The intraday RS filter (trade only in the direction of RS vs SPY) roughly thirds
+  Tug-Of-War's losses** (-52.5R vs -156.8R), but Tug-Of-War stays far worse than random entries
+  on the same stocks: its entries are worse than chance.
+- **Hint for a NEW test (not a result):** random entries in the RS direction on the RS-filtered
+  Tug-Of-War days made +49.8R on average (1,157 trades, about +0.04R a trade). Trading WITH
+  relative strength may carry a small edge on its own. Found after looking, so it must be a new
+  pre-declared test before anyone trusts it.
+- **In-play list (pre-market volume) did not help Tug-Of-War** (every inplay variant lost more per
+  trade on train than raw-4). Cupid fires 0-36 times in 2.5 years on ANY list: its own setup rules
+  (mainly the "<50% candle overlap") are the bottleneck, not the stock list.
+- Holdout NOT used (nothing passed). As pre-declared, the live scanner keeps the user's settings
+  (relative gap 4%, in-play 5%), marked unproven; the runner stays paper-only.
+
+## 2026-11-24: RS continuation (trade with relative strength vs SPY) - FAIL
+
+Follow-up to the hint above. Rules, 27 variants and pass bar written at the top of
+`research_rs_lead.py` before any run; same data, split and costs as research_rs.py.
+Rule: on raw-4 / rel-4 / inplay-5% lists, at 10:00, 10:30 or 11:00 take the list's side only if
+RS since the open agrees by >= 0/1/2%; stop-entry 1 tick beyond that bar, stop at the day's
+extreme (0.2-1.0 x ATR), target 2R, live limits (3 trades/day, 2 open), biggest |RS| first.
+Random controls enter only AFTER the check time (no look-ahead). Full numbers:
+`results_alpaca/rs_lead/report.json`, log `logs/rs_lead_run.log`.
+
+- Chosen on train: raw-4, 10:00, RS >= 1% (train 1,162 trades, +7.7R, +0.007R/trade).
+- Validate: 1,094 trades, **-58.8R** (-0.054R/trade); beat 5/99 random entries (random mean -34.7R).
+  Checks: trades & profit FAIL, random FAIL, better than no-RS reference (-102.6R) PASS -> **FAIL**.
+- Only 1 of 27 variants made money on validate (raw-4 11:00 RS>=2%: +4.5R, +0.004R/trade), and
+  that one lost -72.1R on train. Nothing is positive on both periods.
+- What holds up across all 27: requiring RS agreement **always loses less than not requiring it**
+  (e.g. raw-4 10:30: -8.5R vs -102.4R). RS is a useful FILTER that removes bad trades, but
+  trading with RS is not an edge on its own after costs.
+- The earlier +0.04R hint was the look-ahead in the controls (they could enter before RS was known).
+- Holdout NOT used. Nothing goes live; runner stays paper-only.
+
+## 2026-11-25: live opening-candle bug found in the 24 Nov paper session (fixed)
+
+The paper run on 24 Nov made 20 Power Ranger setups at 09:34; in 19 the stop sat at or just beyond the
+PREVIOUS close (ADI short stop 378.87, real 09:30-09:34 high 337.57). The first candle pushed by
+Longbridge reached back to the previous close; Longbridge's candle history for the same minutes is clean,
+and the runner keeps the first copy of a minute. Effect: 10-20% stops, tiny sizes, unreachable targets,
+both position slots blocked all day (the +0.31R paper result is not meaningful).
+Fix: `dt_runner.verified_bar` - for the first 15 minutes every pushed candle is replaced by the history
+candle for that minute (differences logged as `bar_check`); guard test added (25/25). Replay of 24 Nov on
+clean bars: 10 setups instead of 20, same 2 trades (SNY +1.15R, ADI +0.43R). Cause of the bad push is
+inferred (likely extended-hours trades folded into the first candle); tonight's `bar_check` lines will show.

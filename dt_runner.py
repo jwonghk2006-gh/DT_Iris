@@ -24,6 +24,7 @@ import pandas as pd
 
 import dt_bars as bars
 import dt_config as cfg
+import dt_rs
 import dt_store as store
 import dt_telegram as tg
 from dt_sim import Sim
@@ -31,16 +32,50 @@ from dt_strategies import DETECTORS, Setup, timeframe
 
 HEARTBEAT_S = 15
 POLL_S = 2
+# 2026-11-24: the FIRST pushed 1-minute candle of the session reached back to the previous close
+# (19 of 20 Power Ranger opening ranges spanned the whole gap -> 10-20% stops), while Longbridge's
+# candle history for the same minute was clean. So for the first minutes of the session every pushed
+# candle is replaced by the history candle for that minute (quota-free candlesticks()).
+VERIFY_FIRST_MINUTES = 15
+VERIFY_TRIES, VERIFY_WAIT_S = 4, 0.5
+
+
+def verified_bar(fetch, sym: str, ts: pd.Timestamp, push: tuple, tries: int = VERIFY_TRIES,
+                 wait: float = VERIFY_WAIT_S) -> tuple[tuple, str]:
+    """Return ((o, h, l, c, v), note) for the minute starting at `ts` (UTC).
+
+    fetch(sym) -> [(ts_utc, o, h, l, c, v), ...] from the candle history. The history row for `ts`
+    wins; note says how far the push was off ("" when they agree). If history never has the
+    minute, the pushed candle is used and note starts with "UNVERIFIED"."""
+    err = ""
+    for k in range(tries):
+        try:
+            for r in fetch(sym):
+                if r[0] == ts:
+                    good = tuple(float(x) for x in r[1:6])
+                    off = max(abs(p - g) / g for p, g in zip(push[:4], good[:4]) if g)
+                    note = "" if off < 0.001 else (f"push candle replaced: push o/h/l/c {push[0]:.2f}/{push[1]:.2f}/"
+                                                   f"{push[2]:.2f}/{push[3]:.2f} vs history {good[0]:.2f}/"
+                                                   f"{good[1]:.2f}/{good[2]:.2f}/{good[3]:.2f}")
+                    return good, note
+        except Exception as exc:
+            err = f" ({exc})"
+        if k < tries - 1:
+            time.sleep(wait)
+    return tuple(push), f"UNVERIFIED {ts:%H:%M} UTC candle, history had no row{err}"
 
 
 class Engine:
     """Bars in -> setups out -> fills (paper Sim) or orders (Executor). Shared by live and replay."""
 
     def __init__(self, mode: str, strategies: list[str], watch: dict[str, set], contexts: dict | None = None,
-                 executor=None, notify=None, log: bool = True):
+                 executor=None, notify=None, log: bool = True, allowed: dict[str, set] | None = None,
+                 betas: dict[str, float] | None = None):
         self.mode = mode
         self.strategies = strategies
         self.watch = watch                       # symbol -> {"long","short"} allowed sides
+        self.allowed = allowed or {}             # symbol -> strategies allowed by its watchlist (empty = all)
+        self.rs = dt_rs.RSTracker(betas)         # intraday relative strength vs SPY (information)
         self.contexts = contexts or {}
         self.sim = Sim() if mode == "paper" else None
         self.ex = executor
@@ -63,6 +98,9 @@ class Engine:
         t = ts.tz_convert(cfg.TZ).time()
         if not (bars.OPEN_T <= t < bars.CLOSE_T):
             return []
+        self.rs.on_bar(sym, o, c)
+        if sym == self.rs.bench and sym not in self.watch:
+            return []                                    # benchmark: only feeds the RS line
         st = self._sym(sym)
         if st["last_ts"] is not None and ts <= st["last_ts"]:
             return []                                    # duplicate push
@@ -94,7 +132,7 @@ class Engine:
             if timeframe(name) != tf:
                 continue
             for s in DETECTORS[name](sym, df, len(df) - 1, self.contexts.get(sym), self._sym(sym)["memo"][name]):
-                if s.side in self.watch.get(sym, {"long", "short"}):
+                if s.side in self.watch.get(sym, {"long", "short"}) and name in self.allowed.get(sym, {name}):
                     out.append(s)
         return out
 
@@ -106,9 +144,9 @@ class Engine:
         if self.log:
             store.log_signal({"date": str(s.ready_time.tz_convert(cfg.TZ).date()), "mode": self.mode, "symbol": s.symbol,
                               "strategy": s.strategy, "side": s.side, "trigger": s.trigger, "stop": s.stop,
-                              "target": s.target, "status": "setup", "reason": s.reason})
+                              "target": s.target, "status": "setup", "reason": f"{s.reason}; {self.rs.label(s.symbol)}"})
             self.notify(f"DT_Iris SETUP {s.symbol} {s.strategy} {s.side.upper()}  trigger {s.trigger:.2f}  "
-                        f"stop {s.stop:.2f}  target {s.target:.2f}  ({s.reason})")
+                        f"stop {s.stop:.2f}  target {s.target:.2f}  ({s.reason})  {self.rs.label(s.symbol)}")
 
     def _event(self, ev: tuple) -> None:
         if not self.log:
@@ -162,6 +200,24 @@ def watch_from_settings(settings: dict, day: date) -> dict[str, set]:
         if r["side"] in sides:
             out.setdefault(str(r["symbol"]).upper(), set()).add(r["side"])
     return out
+
+
+def lists_from_watchlist(day: date) -> tuple[dict[str, set], dict[str, float]]:
+    """(symbol -> strategies its list allows, symbol -> beta) from the day's watchlist. Older watchlists
+    without a `lists` column allow every strategy."""
+    from dt_scanner import load_watchlist
+    wl = load_watchlist(day)
+    allowed: dict[str, set] = {}
+    betas: dict[str, float] = {}
+    for _, r in wl.iterrows():
+        sym = str(r["symbol"]).upper()
+        lists = str(r.get("lists") or "")
+        if lists and lists != "nan":
+            allowed[sym] = {st for name in lists.split(",") for st in cfg.LIST_STRATEGIES.get(name, [])}
+        b = r.get("beta")
+        if b is not None and b == b:
+            betas[sym] = float(b)
+    return allowed, betas
 
 
 def other_runner_alive() -> int | None:
@@ -257,11 +313,23 @@ def run_live(mode: str, minutes: int | None = None) -> None:
         contexts[s] = bars.DayContext(s, day, prev,
                                       float(pm.volume) if pm else 0.0,
                                       float(pm.last_done) if pm and pm.last_done else None, None, None)
-    eng = Engine(mode, settings["strategies"], watch, contexts, executor, notify)
+    allowed, betas = ({}, {}) if settings.get("symbols") else lists_from_watchlist(day)
+    if not settings.get("symbols"):                      # relative gap as locked by the 09:00 scan (Power Ranger reads it)
+        from dt_scanner import load_watchlist
+        for r in load_watchlist(day).itertuples():
+            rg = getattr(r, "rel_gap", None)
+            if str(r.symbol).upper() in contexts and rg is not None and rg == rg:
+                contexts[str(r.symbol).upper()].rel_gap_pct = float(rg)
+    eng = Engine(mode, settings["strategies"], watch, contexts, executor, notify, allowed=allowed, betas=betas)
+    if allowed:
+        for name, strats in cfg.LIST_STRATEGIES.items():
+            on = [s for s in syms if allowed.get(s, set()) & set(strats)]
+            print(f"  {name} list -> {', '.join(strats)}: {', '.join(on) or '-'}")
 
     # warm-up with today's bars so far (indicators need the whole session), no trading on them
     now = pd.Timestamp.now(tz="UTC")
-    for s in syms:
+    bench = cfg.RS_BENCHMARK
+    for s in syms + ([bench] if bench not in syms else []):
         try:
             cs = qctx.candlesticks(broker.lb_symbol(s), Period.Min_1, 500, AdjustType.NoAdjust, TradeSessions.All)
         except Exception as exc:
@@ -277,6 +345,10 @@ def run_live(mode: str, minutes: int | None = None) -> None:
             eng.on_bar(s, r.Index, r.open, r.high, r.low, r.close, r.volume, trade=False)
     eng.live_from = now
 
+    def history_rows(sym):
+        cs = qctx.candlesticks(broker.lb_symbol(sym), Period.Min_1, 10, AdjustType.NoAdjust, TradeSessions.Intraday)
+        return [(broker.to_utc(x.timestamp), x.open, x.high, x.low, x.close, x.volume) for x in cs]
+
     def on_candle(symbol, ev):
         if ev.is_confirmed:
             c = ev.candlestick
@@ -287,7 +359,7 @@ def run_live(mode: str, minutes: int | None = None) -> None:
 
     qctx.set_on_candlestick(on_candle)
     qctx.set_on_quote(on_quote)
-    for s in syms:
+    for s in syms + ([bench] if bench not in syms else []):
         qctx.subscribe_candlesticks(broker.lb_symbol(s), Period.Min_1, TradeSessions.Intraday)
     if executor is not None:
         qctx.subscribe([broker.lb_symbol(s) for s in syms], [SubType.Quote])
@@ -306,8 +378,16 @@ def run_live(mode: str, minutes: int | None = None) -> None:
                     c = payload
                     ts = broker.to_utc(c.timestamp)
                     ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-                    prices[sym] = float(c.close)
-                    eng.on_bar(sym, ts, float(c.open), float(c.high), float(c.low), float(c.close), float(c.volume))
+                    bar = (float(c.open), float(c.high), float(c.low), float(c.close), float(c.volume))
+                    t_ny = ts.tz_convert(cfg.TZ)
+                    since_open = (t_ny - t_ny.normalize()).total_seconds() / 60 - (bars.OPEN_T.hour * 60 + bars.OPEN_T.minute)
+                    if 0 <= since_open < VERIFY_FIRST_MINUTES:
+                        bar, note = verified_bar(history_rows, sym, ts, bar)
+                        if note:
+                            print(f"{sym} {t_ny:%H:%M}: {note}")
+                            store.log_activity(mode, "bar_check", f"{sym} {t_ny:%H:%M} {note}")
+                    prices[sym] = bar[3]
+                    eng.on_bar(sym, ts, *bar)
                 elif kind == "quote" and executor is not None:
                     prices[sym] = payload
                     executor.on_price(sym, payload, pd.Timestamp.now(tz="UTC"))

@@ -115,8 +115,12 @@ def page_home():
 
 def page_scanner():
     st.header("Pre-market scanner")
-    st.caption(f"Long watch: gap ≥ +{cfg.MIN_GAP_PCT}% and price ≥ ${cfg.LONG_MIN_PRICE:g}.  Short watch: gap ≤ -{cfg.MIN_GAP_PCT}% "
-               f"and price ≥ ${cfg.SHORT_MIN_PRICE:g}.  Premarket volume ≥ 5,000 (≥ $5) or ≥ 1,000,000 (< $5).")
+    basis = "relative gap (stock gap − beta × SPY gap)" if cfg.GAP_BASIS == "relative" else "gap"
+    st.caption(f"**Gap list** (Power Ranger, Roller Coaster): {basis} ≥ +{cfg.MIN_GAP_PCT}% → long (price ≥ ${cfg.LONG_MIN_PRICE:g}), "
+               f"≤ −{cfg.MIN_GAP_PCT}% → short (price ≥ ${cfg.SHORT_MIN_PRICE:g}); premarket volume ≥ 5,000 (≥ $5) or ≥ 1,000,000 (< $5).  "
+               f"**In play** (Cupid, Tug-Of-War): no gap needed; price ≥ ${cfg.IN_PLAY_MIN_PRICE:g}, average volume ≥ "
+               f"{cfg.IN_PLAY_MIN_ADV:,.0f}, premarket volume ≥ {cfg.IN_PLAY_MIN_PM_RVOL:.0%} of a normal day (pm_rvol); "
+               f"side = sign of the relative gap.  Sector = the ETF the stock moved most like over {cfg.BETA_DAYS} days.")
     import dt_scanner as scanner
     st.markdown(f"**Automatic:** the whole Longbridge stock list (main exchanges, no ETFs/funds/ADRs) is scanned at "
                 f"**{cfg.SCAN_TIME} New York** every weekday by the Windows task *DT_Iris pre-market scan*, and the "
@@ -148,8 +152,18 @@ def page_scanner():
     p = cfg.WATCHLIST_DIR / f"{day}.csv"
     if p.exists():
         df = pd.read_csv(p)
-        st.subheader("Watchlist")
-        st.dataframe(df[df.side.isin(["long", "short"])], use_container_width=True, hide_index=True)
+        wl = df[df.side.isin(["long", "short"])]
+        if "lists" in wl:
+            if "spy_gap" in wl and wl["spy_gap"].notna().any():
+                st.metric("SPY pre-market gap", f"{wl['spy_gap'].dropna().iloc[0]:+.2f}%")
+            lists = wl["lists"].fillna("")
+            st.subheader("Gap list: Power Ranger, Roller Coaster")
+            st.dataframe(wl[lists.str.contains("gap")], use_container_width=True, hide_index=True)
+            st.subheader("In play: Cupid, Tug-Of-War")
+            st.dataframe(wl[lists.str.contains("in_play")], use_container_width=True, hide_index=True)
+        else:
+            st.subheader("Watchlist")
+            st.dataframe(wl, use_container_width=True, hide_index=True)
         with st.expander("Rejected and why"):
             st.dataframe(df[~df.side.isin(["long", "short"])], use_container_width=True, hide_index=True)
     else:

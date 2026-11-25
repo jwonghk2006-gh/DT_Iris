@@ -11,7 +11,7 @@ Started 2026-11-17. The research workspace it came from is `..\Iris` (see `Iris\
 ## Run order
 
 ```
-.venv\Scripts\python.exe test_dt.py                       guard tests (21), run after every change
+.venv\Scripts\python.exe test_dt.py                       guard tests (25), run after every change
 .venv\Scripts\python.exe dt_data.py --import-iris         old Iris IBKR minute data -> data/bars
 .venv\Scripts\python.exe dt_gappers.py --months 12          every 4%+ gap day of the last year (+ minutes, quota-limited)
 .venv\Scripts\python.exe dt_record.py                     EVERY EVENING after 16:05 ET: save today's gappers' minutes (free)
@@ -35,7 +35,8 @@ run_dashboard.bat                                         dashboard at http://lo
 | `dt_data.py` | minute-bar store, Iris CSV import, Longbridge download, holdout lock |
 | `dt_record.py` | nightly: today's gappers + their full-day minute bars, outside the history quota |
 | `dt_gappers.py` | historical gap days (universe -> daily bars -> top 20 gappers per side per day -> minutes) |
-| `dt_scanner.py` | pre-market gap scan of the whole universe (~5,900 stocks, ~5 s) -> `data/watchlists/<date>.csv`; `--scheduled` waits for 09:00 ET and locks it |
+| `dt_rs.py` | relative strength vs SPY: beta, relative gap, best-matching sector ETF, intraday RS line |
+| `dt_scanner.py` | pre-market gap + stocks-in-play scan of the whole universe (~5,900 stocks, ~5 s) -> `data/watchlists/<date>.csv`; `--scheduled` waits for 09:00 ET and locks it |
 | `dt_runner.py` | live loop (Longbridge candle + quote push) and `--replay` |
 | `dt_executor.py` | order manager for the Longbridge demo / live account |
 | `dt_broker.py` | **the only file that sends orders**; keys and gates |

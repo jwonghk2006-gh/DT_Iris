@@ -382,8 +382,100 @@ def test_executor_cutoff_and_kill_switch():
         store.set_kill_switch(False)
 
 
+# ------------------------------------------------------------------ relative strength and the two watchlists
+def test_beta_and_relative_gap():
+    import dt_rs as rs
+    rng = np.random.default_rng(1)
+    m = rng.normal(0, 0.01, 80)
+    days = pd.date_range("2026-01-02", periods=81, freq="B").date
+    spy = pd.Series(100 * np.cumprod(np.r_[1, 1 + m]), index=days)
+    chip = pd.Series(50 * np.cumprod(np.r_[1, 1 + 2 * m]), index=days)            # moves exactly 2x SPY
+    assert abs(rs.beta(chip, spy) - 2.0) < 1e-6
+    wild = pd.Series(50 * np.cumprod(np.r_[1, 1 + 9 * m]), index=days)
+    assert rs.beta(wild, spy) == cfg.BETA_MAX                                     # clamped
+    assert rs.beta(chip.tail(20), spy) is None                                    # too few days
+    assert rs.rel_gap(3.0, -1.0, 1.0) == 4.0                                      # SPY -1%, stock +3% -> +4% strong
+    assert rs.rel_gap(6.0, 0.5, 1.0) == 5.5
+    assert rs.rel_gap(3.0, 1.0, 2.0) == 1.0                                       # a 2x-beta stock: mostly market
+    assert rs.rel_gap(3.0, None, 1.0) is None
+    assert rs.could_pass(3.0, -1.0, 4.0) and not rs.could_pass(1.0, 0.2, 4.0)
+    etf, corr, sb = rs.best_sector(chip, {"SMH": chip * 1.5, "XLU": pd.Series(rng.normal(50, 1, 81), index=days)})
+    assert etf == "SMH" and corr > 0.99 and abs(sb - 1.0) < 1e-6
+    t = rs.RSTracker({"AAA": 1.5})
+    t.on_bar("SPY", 100, 100); t.on_bar("AAA", 10, 10)
+    t.on_bar("SPY", 100, 99); t.on_bar("AAA", 10, 10.1)                         # SPY -1%, AAA +1%, beta 1.5
+    assert abs(t.rs("AAA") - 2.5) < 1e-9
+
+
+def test_scanner_lists():
+    import dt_scanner as sc
+    base = dict(prev_close=10.0, premarket_volume=200_000, avg_daily_volume=2_000_000, split=None, spy_gap=-1.0, beta=1.0)
+    rows = [
+        dict(base, symbol="RSUP", price=30.0, gap_pct=3.0, rel_gap=4.0, pm_rvol=0.01),    # raw 3% but strong vs SPY
+        dict(base, symbol="MKT", price=30.0, gap_pct=4.5, rel_gap=2.5, pm_rvol=0.01),     # big raw gap, mostly market
+        dict(base, symbol="HOT", price=40.0, gap_pct=0.5, rel_gap=1.5, pm_rvol=0.20),     # no gap, heavy volume
+        dict(base, symbol="WEAK", price=60.0, gap_pct=-1.0, rel_gap=-0.4, pm_rvol=0.08),  # in play, relative weakness
+        dict(base, symbol="THIN", price=40.0, gap_pct=0.5, rel_gap=1.5, pm_rvol=0.20, avg_daily_volume=600_000),
+    ]
+    old = cfg.GAP_BASIS
+    try:
+        cfg.GAP_BASIS = "relative"
+        df = sc.rank([dict(r) for r in rows], pd.Timestamp("2026-11-24").date()).set_index("symbol")
+        assert df.loc["RSUP", "lists"] == "gap" and df.loc["RSUP", "side"] == "long"
+        assert df.loc["MKT", "side"] == ""                                            # rejected: rel gap too small
+        assert df.loc["HOT", "lists"] == "in_play" and df.loc["HOT", "side"] == "long"
+        assert df.loc["WEAK", "lists"] == "in_play" and df.loc["WEAK", "side"] == "short"
+        assert df.loc["THIN", "side"] == ""                                           # not liquid enough
+        cfg.GAP_BASIS = "raw"
+        df = sc.rank([dict(r) for r in rows], pd.Timestamp("2026-11-24").date()).set_index("symbol")
+        assert df.loc["MKT", "lists"] == "gap" and df.loc["RSUP", "side"] == ""
+    finally:
+        cfg.GAP_BASIS = old
+
+
+def test_engine_respects_lists():
+    import dt_runner
+    from dt_strategies import Setup
+    eng = dt_runner.Engine("paper", ["power_ranger", "cupid"], {"AAA": {"long"}}, log=False,
+                           allowed={"AAA": set(cfg.LIST_STRATEGIES["in_play"])})
+    ts = pd.Timestamp("2026-11-24 15:00", tz="UTC")
+    mk = lambda name: Setup("AAA", name, "long", ts, ts, 10.0, 9.0, 12.0, ts, "test")
+    saved = dt_runner.DETECTORS.copy()
+    try:
+        for name in ("power_ranger", "cupid"):
+            dt_runner.DETECTORS[name] = (lambda n: (lambda *a: [mk(n)]))(name)
+        eng._sym("AAA")["frames"] = {tf: [{"time": ts, "open": 10, "high": 10, "low": 10, "close": 10, "volume": 1}]
+                                     for tf in eng.tfs}
+        got = {s.strategy for tf in eng.tfs for s in eng._detect("AAA", tf)}
+        assert got == {"cupid"}, got                                                  # in_play list: no Power Ranger
+    finally:
+        dt_runner.DETECTORS.clear(); dt_runner.DETECTORS.update(saved)
+    assert eng.on_bar("SPY", ts, 100, 100, 100, 100, 1) == [] and "SPY" not in eng.state   # benchmark only feeds RS
+
+
+def test_opening_candle_replaced_by_history():
+    """2026-11-24 bug: the first pushed candle reached back to the previous close (ADI high 378.86
+    while the real 09:30 high was 337.57). The history candle must win; no history -> UNVERIFIED."""
+    import dt_runner
+    ts = pd.Timestamp("2026-11-24 14:30", tz="UTC")
+    bad = (378.75, 378.86, 328.00, 335.165, 45136.0)
+    good = (ts, 329.84, 337.57, 328.00, 335.165, 45136)
+    other = (ts - pd.Timedelta(minutes=1), 328.8, 330.51, 327.67, 328.5, 3414)
+    bar, note = dt_runner.verified_bar(lambda s: [other, good], "ADI", ts, bad, wait=0)
+    assert bar[:4] == (329.84, 337.57, 328.00, 335.165) and "replaced" in note, (bar, note)
+    bar, note = dt_runner.verified_bar(lambda s: [good], "ADI", ts, good[1:], wait=0)
+    assert note == "", note                                                       # agreeing push: silent
+    calls = []
+    bar, note = dt_runner.verified_bar(lambda s: calls.append(1) or [other], "ADI", ts, bad, tries=3, wait=0)
+    assert bar == bad and note.startswith("UNVERIFIED") and len(calls) == 3, (bar, note, calls)
+    def boom(s):
+        raise RuntimeError("quote down")
+    bar, note = dt_runner.verified_bar(boom, "ADI", ts, bad, tries=2, wait=0)
+    assert bar == bad and "quote down" in note
+
+
 if __name__ == "__main__":
-    tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
+    tests =[(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
     for n, f in tests:
         try:

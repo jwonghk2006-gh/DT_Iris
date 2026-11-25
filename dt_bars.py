@@ -193,12 +193,21 @@ class DayContext:
     premarket_last: float | None
     daily_atr: float | None
     avg_daily_volume: float | None
+    rel_gap_pct: float | None = None     # gap relative to SPY (stock gap - beta x SPY gap), from the scanner
 
     @property
     def gap_pct(self) -> float | None:
         if not self.prev_close or self.premarket_last is None:
             return None
         return (self.premarket_last / self.prev_close - 1.0) * 100.0
+
+    @property
+    def basis_gap_pct(self) -> float | None:
+        """The gap the setups judge: relative to SPY when GAP_BASIS is "relative" and known, else raw."""
+        import dt_config as cfg
+        if cfg.GAP_BASIS == "relative" and self.rel_gap_pct is not None:
+            return self.rel_gap_pct
+        return self.gap_pct
 
 
 def day_context(symbol: str, day, sessions: dict, daily: pd.DataFrame | None = None) -> DayContext:

@@ -23,7 +23,7 @@ python -m venv .venv
 .venv\Scripts\python.exe test_dt.py
 ```
 
-The last line should end with `21/21 passed`. The first `git clone` opens a browser window
+The last line should end with `25/25 passed`. The first `git clone` opens a browser window
 to sign in to GitHub.
 
 ## 3. Keys (`.env`)
