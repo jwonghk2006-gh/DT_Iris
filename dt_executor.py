@@ -29,6 +29,8 @@ from dt_strategies import Setup
 ENTRY_TIMEOUT_S = 20
 EXIT_RETRY_S = 10
 EXIT_AWAY = (0.005, 0.015)      # marketable exit limit: 0.5% through the price, then 1.5% on retry
+CANCEL_WAIT_S, CANCEL_POLL_S = 3.0, 0.25    # how long to wait for the broker to confirm a cancel
+FINAL = ("Filled", "Canceled", "Rejected", "Expired", "PartialWithdrawal")   # no more fills can come
 
 
 def _ny(ts: pd.Timestamp):
@@ -36,11 +38,12 @@ def _ny(ts: pd.Timestamp):
 
 
 class Executor:
-    def __init__(self, broker: Broker, notify=None, clock=time.time):
+    def __init__(self, broker: Broker, notify=None, clock=time.time, sleep=time.sleep):
         self.b = broker
         self.mode = broker.mode
         self.notify = notify or (lambda text: None)
         self.clock = clock
+        self.sleep = sleep
         self.pending: dict[str, Setup] = {}
         self.working: dict[str, dict] = {}     # symbol -> entry order in flight
         self.positions: dict[str, dict] = {}
@@ -103,7 +106,8 @@ class Executor:
                 if sg * (last - (pos["entry"] + sg * cfg.BREAKEVEN_AT_R * pos["risk_ps"])) >= 0:
                     pos["stop"], pos["be"] = pos["entry"], True
                     store.log_activity(self.mode, "manage", f"{sym}: stop to breakeven {pos['entry']:.2f}")
-        if _ny(now) >= bars.CUTOFF_T:
+        t_ny, cut_t, _, _ = bars.times_at(now)
+        if t_ny >= cut_t:
             return
         for key, s in list(self.pending.items()):
             if s.symbol != sym:
@@ -164,11 +168,12 @@ class Executor:
                 if st["status"] == "Filled":
                     self._closed(sym, st["avg_price"] or pos["exit_px"], pos["exit_reason"], now)
                 elif self.clock() - pos["exit_sent"] > EXIT_RETRY_S:
-                    self.b.cancel(pos["exit_oid"])
-                    left = pos["shares"] - int(st["filled"])
-                    pos["shares"] = left
+                    st = self._cancel_wait(pos["exit_oid"])          # final fill count, after the cancel
                     pos["exit_oid"] = None
-                    if left > 0:
+                    self._book_partial(pos, st, pos["exit_px"])
+                    if pos["shares"] <= 0:
+                        self._closed(sym, None, pos["exit_reason"], now)
+                    else:
                         self._exit(sym, pos["exit_px"], pos["exit_reason"], away=EXIT_AWAY[1])
             elif pos.get("target_oid"):
                 st = self.b.order_state(pos["target_oid"])
@@ -205,16 +210,44 @@ class Executor:
         store.log_activity(self.mode, "entry", msg)
         self.notify(msg)
 
+    def _cancel_wait(self, oid: str) -> dict:
+        """Cancel and wait until the broker reports a final state, so no fill can arrive after we act on
+        the count. 2026-11-25 review: the exit used to be sent right after the cancel REQUEST; a target
+        filling in that moment would have closed the position twice (long -> short)."""
+        self.b.cancel(oid)
+        waited = 0.0
+        while True:
+            st = self.b.order_state(oid)
+            if st["status"] in FINAL or waited >= CANCEL_WAIT_S:
+                if st["status"] not in FINAL:
+                    store.log_activity(self.mode, "warn", f"cancel of {oid} not confirmed after {CANCEL_WAIT_S:.0f}s "
+                                                          f"(status {st['status']})")
+                return st
+            self.sleep(CANCEL_POLL_S)
+            waited += CANCEL_POLL_S
+
+    def _book_partial(self, pos: dict, st: dict, ref_price: float) -> None:
+        """Shares that DID fill on a cancelled closing order: keep their P&L, shrink the open size.
+        2026-11-25 review: these used to drop out of the trade's result."""
+        n = int(st["filled"])
+        if n <= 0:
+            return
+        sg = 1 if pos["side"] == "long" else -1
+        px = float(st["avg_price"] or ref_price)
+        pos["realized"] = pos.get("realized", 0.0) + sg * (px - pos["entry"]) * n
+        pos["exit_costs"] = pos.get("exit_costs", 0.0) + cfg.commission(n)
+        pos["closed_shares"] = pos.get("closed_shares", 0) + n
+        pos["shares"] -= n
+
     def _exit(self, sym, ref_price, reason, away=EXIT_AWAY[0]) -> None:
         pos = self.positions[sym]
         if pos.get("target_oid"):
-            self.b.cancel(pos["target_oid"])
-            st = self.b.order_state(pos["target_oid"])
+            st = self._cancel_wait(pos["target_oid"])
             pos["target_oid"] = None
             if st["filled"] >= pos["shares"]:
                 self._closed(sym, st["avg_price"] or pos["target"], "target", pd.Timestamp.now(tz="UTC"))
                 return
-            pos["shares"] -= int(st["filled"])
+            self._book_partial(pos, st, pos["target"])
         sg = 1 if pos["side"] == "long" else -1
         px = ref_price * (1 - sg * away)
         px = min(px, ref_price - 2 * cfg.TICK) if sg > 0 else max(px, ref_price + 2 * cfg.TICK)
@@ -227,20 +260,25 @@ class Executor:
         pos["exit_sent"], pos["exit_px"], pos["exit_reason"] = self.clock(), ref_price, reason
 
     def _closed(self, sym, price, reason, now) -> None:
+        """price = average fill of the LAST closing order (None if earlier partial fills closed everything)."""
         pos = self.positions.pop(sym)
         sg = 1 if pos["side"] == "long" else -1
-        costs = 2 * cfg.commission(pos["shares"])
-        pnl = sg * (float(price) - pos["entry"]) * pos["shares"] - costs
-        risk = pos["risk_ps"] * pos["shares"]
+        last_n = pos["shares"] if price is not None else 0
+        total = last_n + pos.get("closed_shares", 0)
+        costs = cfg.commission(total) + pos.get("exit_costs", 0.0) + (cfg.commission(last_n) if last_n else 0.0)
+        gross = pos.get("realized", 0.0) + (sg * (float(price) - pos["entry"]) * last_n if last_n else 0.0)
+        pnl = gross - costs
+        risk = pos["risk_ps"] * total
         r = pnl / risk if risk > 0 else 0.0
+        exit_px = pos["entry"] + sg * gross / total if total else pos["entry"]      # average exit over all fills
         self.day_pnl += pnl
         self.day_r += r
         store.log_trade({"date": str(self.day), "mode": self.mode, "symbol": sym, "strategy": pos["strategy"],
                          "side": pos["side"], "entry_time": pos["entry_time"], "entry": pos["entry"], "stop": pos["stop"],
-                         "target": pos["target"], "shares": pos["shares"], "exit_time": str(now), "exit": float(price),
+                         "target": pos["target"], "shares": total, "exit_time": str(now), "exit": round(exit_px, 4),
                          "exit_reason": reason, "r_multiple": round(r, 3), "pnl": round(pnl, 2), "costs": round(costs, 2),
                          "notes": pos.get("setup_reason", "")})
-        msg = f"DT_Iris {self.mode.upper()} EXIT {sym} {reason} @ {float(price):.2f}  {r:+.2f}R  ${pnl:+,.2f}"
+        msg = f"DT_Iris {self.mode.upper()} EXIT {sym} {reason} @ {exit_px:.2f}  {r:+.2f}R  ${pnl:+,.2f}"
         store.log_activity(self.mode, "exit", msg, pnl)
         self.notify(msg)
 

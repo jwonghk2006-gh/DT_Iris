@@ -33,6 +33,12 @@ SESSION_CLOSE = "16:00"
 ENTRY_CUTOFF = "12:00"       # no NEW entries from this time (Iris rule)
 FLATTEN_TIME = "15:00"       # every intraday position closed at this time (Iris rule)
 PREMARKET_START = "04:00"
+# Early-close sessions (NYSE half days, 13:00 close). On these days the runner, the paper simulator and
+# the setups use: no new entries EARLY_CLOSE_CUTOFF_MIN before the close, flat EARLY_CLOSE_FLATTEN_MIN
+# before it (never later than the normal 12:00 / 15:00). Add next year's dates when NYSE publishes them.
+EARLY_CLOSE_DAYS = {"2026-11-27": "13:00", "2026-12-24": "13:00"}
+EARLY_CLOSE_CUTOFF_MIN = 75      # 13:00 close -> no new entries from 11:45
+EARLY_CLOSE_FLATTEN_MIN = 15     # 13:00 close -> everything flat at 12:45
 
 # ------------------------------------------------------------------ watchlist filters (from the course notes)
 LONG_MIN_PRICE = 5.0         # long watch: price at least $5 (raised from the course $1 on 2026-11-20: keeps out $1-2 small caps)

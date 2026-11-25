@@ -37,7 +37,67 @@ POLL_S = 2
 # candle history for the same minute was clean. So for the first minutes of the session every pushed
 # candle is replaced by the history candle for that minute (quota-free candlesticks()).
 VERIFY_FIRST_MINUTES = 15
-VERIFY_TRIES, VERIFY_WAIT_S = 4, 0.5
+VERIFY_TRIES, VERIFY_WAIT_S = 3, 0.5
+VERIFY_SETTLE_S = 1.0          # wait ONCE per new minute so the history has the bar (not once per symbol)
+VERIFY_CALL_GAP_S = 0.12       # at most ~8 history calls a second (Longbridge allows about 10)
+ERROR_ALERT_EVERY_S = 300      # Telegram at most once per 5 minutes per kind of error
+
+
+class Pacer:
+    """Keeps at least `gap` seconds between calls."""
+
+    def __init__(self, gap: float, clock=time.monotonic, sleep=time.sleep):
+        self.gap, self.clock, self.sleep, self.last = gap, clock, sleep, None
+
+    def wait(self) -> None:
+        if self.last is not None:
+            left = self.gap - (self.clock() - self.last)
+            if left > 0:
+                self.sleep(left)
+        self.last = self.clock()
+
+
+class ErrorGuard:
+    """Runs one step of the live loop; an exception is printed, logged and (throttled) sent to Telegram,
+    and the loop carries on. 2026-11-25 review: before this, ANY error (a network blip while checking an
+    order, a rate-limit reply) ended the runner - and with it the locally watched stops."""
+
+    def __init__(self, mode: str, notify, clock=time.time):
+        self.mode, self.notify, self.clock = mode, notify, clock
+        self.last_alert: dict[str, float] = {}
+        self.count: dict[str, int] = {}
+
+    def run(self, what: str, fn, *args):
+        try:
+            return fn(*args)
+        except Exception as exc:
+            kind = what.split()[0]
+            self.count[kind] = self.count.get(kind, 0) + 1
+            msg = f"{what}: {type(exc).__name__}: {exc}"
+            print(f"ERROR (runner keeps going) {msg}", flush=True)
+            store.log_activity(self.mode, "error", msg)
+            if self.clock() - self.last_alert.get(kind, -1e18) >= ERROR_ALERT_EVERY_S:
+                self.last_alert[kind] = self.clock()
+                self.notify(f"DT_Iris {self.mode} ERROR (still running, {self.count[kind]}x so far): {msg[:300]}")
+            return None
+
+
+def daily_stats(sym: str, day: date) -> tuple[float | None, float | None]:
+    """(14-day daily ATR, 20-day average volume) from the days before `day` - the values the backtests
+    put in DayContext. 2026-11-25 review: live contexts had neither, so Power Ranger's opening-range
+    width check (0.05-1.5 x daily ATR) never ran live. Daily bars are fetched quota-free when stale."""
+    try:
+        import dt_gappers as gap
+        from dt_scanner import avg_daily_volume
+        adv = avg_daily_volume(sym, day)                  # refreshes data/daily/<sym> when stale
+        d = gap.load_daily(sym)
+        if d is None or not len(d):
+            return None, adv
+        before = d[d.index < day]
+        return (bars.daily_atr(before) if len(before) >= 2 else None), adv
+    except Exception as exc:
+        print(f"  {sym}: daily stats failed ({exc})")
+        return None, None
 
 
 def verified_bar(fetch, sym: str, ts: pd.Timestamp, push: tuple, tries: int = VERIFY_TRIES,
@@ -95,8 +155,8 @@ class Engine:
 
     def on_bar(self, sym: str, ts: pd.Timestamp, o, h, l, c, v, trade: bool = True) -> list[Setup]:
         """One CONFIRMED 1-minute bar (ts = bar start, UTC)."""
-        t = ts.tz_convert(cfg.TZ).time()
-        if not (bars.OPEN_T <= t < bars.CLOSE_T):
+        t, _, _, close_t = bars.times_at(ts)
+        if not (bars.OPEN_T <= t < close_t):
             return []
         self.rs.on_bar(sym, o, c)
         if sym == self.rs.bench and sym not in self.watch:
@@ -172,20 +232,20 @@ class Engine:
 
     def clock(self, now: pd.Timestamp, prices: dict) -> None:
         """Time rules that must fire even when no bar arrives."""
-        t = now.tz_convert(cfg.TZ).time()
-        if t >= bars.CUTOFF_T or store.kill_switch_on():
+        t, cut_t, flat_t, _ = bars.times_at(now)
+        if t >= cut_t or store.kill_switch_on():
             if self.sim is not None:
                 self.sim.pending.clear()
             if self.ex is not None and self.ex.pending:
-                self.ex.drop_pending("12:00 cutoff" if t >= bars.CUTOFF_T else "kill switch")
-        if t >= bars.FLATTEN_T:
+                self.ex.drop_pending(f"{cut_t:%H:%M} cutoff" if t >= cut_t else "kill switch")
+        if t >= flat_t:
             if self.sim is not None and self.sim.positions:
                 n0 = len(self.sim.events)
-                self.sim.close_all(now, prices, "flatten 15:00")
+                self.sim.close_all(now, prices, f"flatten {flat_t:%H:%M}")
                 for ev in self.sim.events[n0:]:
                     self._event(ev)
             if self.ex is not None and (self.ex.positions or self.ex.working):
-                self.ex.flatten_all(prices)
+                self.ex.flatten_all(prices, f"flatten {flat_t:%H:%M}")
 
 
 # ------------------------------------------------------------------ helpers
@@ -310,9 +370,12 @@ def run_live(mode: str, minutes: int | None = None) -> None:
         pm = qt.pre_market_quote
         # pre-market quote's prev_close = yesterday's close (split-adjusted); before the open qt.prev_close is a day older
         prev = float(pm.prev_close) if pm and getattr(pm, "prev_close", None) else (float(qt.prev_close) if qt.prev_close else None)
+        datr, adv = daily_stats(s, day)                  # same daily ATR / 20-day volume the backtests use
         contexts[s] = bars.DayContext(s, day, prev,
                                       float(pm.volume) if pm else 0.0,
-                                      float(pm.last_done) if pm and pm.last_done else None, None, None)
+                                      float(pm.last_done) if pm and pm.last_done else None, datr, adv)
+        if datr is None:
+            print(f"  {s}: no daily ATR (Power Ranger range check off for it)")
     allowed, betas = ({}, {}) if settings.get("symbols") else lists_from_watchlist(day)
     if not settings.get("symbols"):                      # relative gap as locked by the 09:00 scan (Power Ranger reads it)
         from dt_scanner import load_watchlist
@@ -345,7 +408,10 @@ def run_live(mode: str, minutes: int | None = None) -> None:
             eng.on_bar(s, r.Index, r.open, r.high, r.low, r.close, r.volume, trade=False)
     eng.live_from = now
 
+    pace = Pacer(VERIFY_CALL_GAP_S)
+
     def history_rows(sym):
+        pace.wait()                                       # Longbridge: about 10 quote calls a second
         cs = qctx.candlesticks(broker.lb_symbol(sym), Period.Min_1, 10, AdjustType.NoAdjust, TradeSessions.Intraday)
         return [(broker.to_utc(x.timestamp), x.open, x.high, x.low, x.close, x.volume) for x in cs]
 
@@ -370,42 +436,54 @@ def run_live(mode: str, minutes: int | None = None) -> None:
     stop_at = time.time() + minutes * 60 if minutes else None
     prices: dict[str, float] = {}
     last_beat = last_poll = 0.0
+    settled_minute = None                                 # opening minutes: wait once per minute for the history
+    guard = ErrorGuard(mode, notify)
+    _, flat_t, _ = bars.session_times(day)
+    end_t = (pd.Timestamp.combine(day, flat_t) + pd.Timedelta(minutes=5)).time()   # 15:05, or 12:50 on a half day
+
+    def handle(kind, sym, payload):
+        nonlocal settled_minute
+        if kind == "bar":
+            c = payload
+            ts = broker.to_utc(c.timestamp)
+            bar = (float(c.open), float(c.high), float(c.low), float(c.close), float(c.volume))
+            t_ny = ts.tz_convert(cfg.TZ)
+            since_open = (t_ny - t_ny.normalize()).total_seconds() / 60 - (bars.OPEN_T.hour * 60 + bars.OPEN_T.minute)
+            if 0 <= since_open < VERIFY_FIRST_MINUTES:
+                if settled_minute is None or ts > settled_minute:
+                    time.sleep(VERIFY_SETTLE_S)           # once per minute, not once per symbol
+                    settled_minute = ts
+                bar, note = verified_bar(history_rows, sym, ts, bar)
+                if note:
+                    print(f"{sym} {t_ny:%H:%M}: {note}")
+                    store.log_activity(mode, "bar_check", f"{sym} {t_ny:%H:%M} {note}")
+            prices[sym] = bar[3]
+            eng.on_bar(sym, ts, *bar)
+        elif kind == "quote" and executor is not None:
+            prices[sym] = payload
+            executor.on_price(sym, payload, pd.Timestamp.now(tz="UTC"))
+
     try:
         while True:
             try:
-                kind, sym, payload = q.get(timeout=1.0)
-                if kind == "bar":
-                    c = payload
-                    ts = broker.to_utc(c.timestamp)
-                    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-                    bar = (float(c.open), float(c.high), float(c.low), float(c.close), float(c.volume))
-                    t_ny = ts.tz_convert(cfg.TZ)
-                    since_open = (t_ny - t_ny.normalize()).total_seconds() / 60 - (bars.OPEN_T.hour * 60 + bars.OPEN_T.minute)
-                    if 0 <= since_open < VERIFY_FIRST_MINUTES:
-                        bar, note = verified_bar(history_rows, sym, ts, bar)
-                        if note:
-                            print(f"{sym} {t_ny:%H:%M}: {note}")
-                            store.log_activity(mode, "bar_check", f"{sym} {t_ny:%H:%M} {note}")
-                    prices[sym] = bar[3]
-                    eng.on_bar(sym, ts, *bar)
-                elif kind == "quote" and executor is not None:
-                    prices[sym] = payload
-                    executor.on_price(sym, payload, pd.Timestamp.now(tz="UTC"))
+                item = q.get(timeout=1.0)
             except queue.Empty:
-                pass
+                item = None
+            if item is not None:
+                guard.run(f"{item[0]} {item[1]}", handle, *item)   # one bad event never stops the runner
             now = pd.Timestamp.now(tz="UTC")
-            eng.clock(now, prices)
+            guard.run("clock", eng.clock, now, prices)
             if executor is not None and time.time() - last_poll >= POLL_S:
-                executor.poll(now)
-                store.save_state(executor.to_state())
+                guard.run("order check", executor.poll, now)
+                guard.run("save state", lambda: store.save_state(executor.to_state()))
                 last_poll = time.time()
             if time.time() - last_beat >= HEARTBEAT_S:
-                store.write_runner_status({"pid": os.getpid(), "beat": time.time(), "mode": mode, "symbols": syms,
-                                           "time": store.now_iso(),
-                                           "open_positions": list((executor.positions if executor else eng.sim.positions).keys())})
+                guard.run("heartbeat", lambda: store.write_runner_status(
+                    {"pid": os.getpid(), "beat": time.time(), "mode": mode, "symbols": syms, "time": store.now_iso(),
+                     "open_positions": list((executor.positions if executor else eng.sim.positions).keys())}))
                 last_beat = time.time()
             t_ny = now.tz_convert(cfg.TZ).time()
-            if t_ny >= bars.hm("15:05") or (stop_at and time.time() > stop_at):
+            if t_ny >= end_t or (stop_at and time.time() > stop_at):
                 break
     except KeyboardInterrupt:
         print("stopping...")
@@ -440,4 +518,14 @@ if __name__ == "__main__":
             print(f"  {t['symbol']:6} {t['strategy']:14} {t['side']:5} {t['entry']:>8.2f} -> {t['exit']:>8.2f} "
                   f"{t['exit_reason']:14} {t['r_multiple']:+.2f}R")
     else:
-        run_live(a.mode or store.load_settings()["mode"], a.minutes)
+        mode = a.mode or store.load_settings()["mode"]
+        try:
+            run_live(mode, a.minutes)
+        except Exception as exc:                          # set-up failure or a crash outside the guarded loop
+            import traceback
+            traceback.print_exc()
+            store.log_activity(mode, "error", f"runner CRASHED: {type(exc).__name__}: {exc}")
+            if tg.configured():
+                tg.send(f"DT_Iris runner ({mode}) CRASHED: {type(exc).__name__}: {exc}. "
+                        f"Check open positions in the Longbridge app.")
+            raise

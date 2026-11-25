@@ -47,7 +47,7 @@ Rules for working with me:
   once; do not tune until it passes (I lost money with an over-fitted grid-search system, AQS).
 - A result counts only if it beats the random-entry noise check and survives realistic costs
   (1 cent slippage per fill + $0.005/share commission).
-- Run test_dt.py after code changes (26 tests). Never print or copy secrets from .env.
+- Run test_dt.py after code changes (31 tests). Never print or copy secrets from .env.
 - Do not place orders or start the runner in lbpaper/live mode without my explicit OK.
 - Longbridge quirk: before the open, quote().prev_close is TWO sessions old; use
   pre_market_quote.prev_close (already split-adjusted). The scanner does this since 2026-11-20.

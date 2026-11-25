@@ -251,3 +251,22 @@ Compared the locked 09:00 lists (20, 23, 24 Nov) with the real gaps at the open 
   still missing; guard test added (26/26). Live check: 5,815 rows, only 6 dotted share classes missing.
 - Open question (not done): the backtests measure the gap at the open, the live list at 09:00. A 09:25
   refresh or a backtest on 09:00 data would close that gap.
+
+## 2026-11-25: full code review of the live path - 5 fixes before the first lbpaper session
+
+Reviewed broker, executor, runner, simulator, bars, scanner, store, recorder and config line by line.
+Fixed (31 guard tests, all pass):
+1. Runner robustness: any exception in the live loop ended the runner (and the locally watched stops).
+   `ErrorGuard` now logs each failing step, alerts Telegram (at most once per 5 min per kind) and carries
+   on; a crash outside the loop sends a "CRASHED - check positions" alert.
+2. Live contexts had no daily ATR / 20-day volume, so Power Ranger's range-width check (0.05-1.5 x ATR)
+   never ran live (and ORB could never fire). `daily_stats` fills both; values match gappers.csv exactly.
+   24 Nov through the live path on clean bars: 6 Power Ranger setups instead of 20; same 2 trades.
+3. The opening-candle check now waits once per minute (not per symbol) and paces history calls to ~8/s.
+4. Early-close days (`EARLY_CLOSE_DAYS`: 2026-11-27, 2026-12-24): entries stop 11:45, flat 12:45, runner
+   ends 12:50 - in setups, paper sim, order manager and runner. Before: a 15:00 flatten after a 13:00 close.
+5. Order manager: partial exit fills now keep their P&L; a cancel is confirmed (final status) before the
+   exit is sent, so a target filling during the cancel cannot close the position twice.
+Not fixed (small): `run_live` saves the mode it ran in as the default; dotted share classes (BRK.B) are
+never quoted; Power Ranger's opening range counts 5 bars, not 5 minutes, for stocks with an empty minute.
+Correction: lbpaper sizes on min(ACCOUNT_SIZE, net assets) = $10,000, so about $100 risk a trade.

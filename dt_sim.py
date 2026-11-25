@@ -113,12 +113,12 @@ class Sim:
         """Process one CONFIRMED 1-minute bar (ts = bar start, UTC). Returns new events."""
         self._new_day(ts)
         n0 = len(self.events)
-        t_ny = ts.tz_convert(cfg.TZ).time()
+        t_ny, _, flat_t, _ = bars.times_at(ts)
 
         # 1) manage an open position
         pos = self.positions.get(sym)
         if pos is not None:
-            if t_ny >= bars.FLATTEN_T:
+            if t_ny >= flat_t:
                 self._close(sym, pos, ts, o - pos.sgn * self.slip, "flatten 15:00")
             else:
                 self._manage(sym, pos, ts, o, h, l, c, entry_bar=False)

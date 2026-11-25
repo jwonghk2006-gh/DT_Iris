@@ -36,6 +36,8 @@ except a ONE-OFF task "DT_Iris lbpaper runner (tonight)" the user approved for 2
   beats the random-entry noise check after costs (1 cent slippage per fill + $0.005/share).
 - Holdouts (`data/manifest.json`, `data_alpaca/manifest.json`) stay locked; use once, pass bar first.
 - Run `.venv\Scripts\python.exe test_dt.py` after code changes.
+- Half days: add NYSE early closes to `EARLY_CLOSE_DAYS` in dt_config (2026-11-27 and 2026-12-24 are in;
+  cutoff 11:45, flat 12:45). Next year's dates must be added by hand.
 
 ## Longbridge gotchas
 - Timestamps come back naive in the PC's local time (SGT): convert with `dt_broker.to_utc`, never `tz_localize("UTC")`.

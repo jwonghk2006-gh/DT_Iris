@@ -27,6 +27,23 @@ CUTOFF_T, FLATTEN_T = hm(cfg.ENTRY_CUTOFF), hm(cfg.FLATTEN_TIME)
 PRE_T = hm(cfg.PREMARKET_START)
 
 
+def session_times(day) -> tuple[dtime, dtime, dtime]:
+    """(entry cutoff, flatten, close) for one NY date; earlier on the early-close days in dt_config."""
+    close = cfg.EARLY_CLOSE_DAYS.get(str(day))
+    if not close:
+        return CUTOFF_T, FLATTEN_T, CLOSE_T
+    c = hm(close)
+    mins = c.hour * 60 + c.minute
+    k, f = mins - cfg.EARLY_CLOSE_CUTOFF_MIN, mins - cfg.EARLY_CLOSE_FLATTEN_MIN
+    return min(CUTOFF_T, dtime(k // 60, k % 60)), min(FLATTEN_T, dtime(f // 60, f % 60)), c
+
+
+def times_at(ts: pd.Timestamp) -> tuple[dtime, dtime, dtime, dtime]:
+    """(time of day in NY, cutoff, flatten, close) for a UTC or NY timestamp."""
+    t = ts.tz_convert(cfg.TZ)
+    return (t.time(), *session_times(t.date()))
+
+
 # ------------------------------------------------------------------ loading / shaping
 def normalize(df: pd.DataFrame) -> pd.DataFrame:
     """Any 1-minute frame -> index = UTC timestamp of the bar START, columns open..volume."""

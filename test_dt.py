@@ -507,6 +507,121 @@ def test_scanner_requotes_dropped_symbols():
     assert left == ["BRK.B"] and len(ctx.calls) == 3 and len(got) == 4
 
 
+def test_runner_error_guard_keeps_going():
+    """2026-11-25 review: any exception in the live loop used to end the runner (and the local stops)."""
+    import dt_runner
+    sent, t = [], [0.0]
+    g = dt_runner.ErrorGuard("lbpaper", sent.append, clock=lambda: t[0])
+    def boom():
+        raise ConnectionError("order_detail timed out")
+    assert g.run("order check", boom) is None and len(sent) == 1 and "still running" in sent[0]
+    g.run("order check", boom)                                        # same kind within 5 minutes: no new alert
+    assert len(sent) == 1 and g.count["order"] == 2
+    t[0] = dt_runner.ERROR_ALERT_EVERY_S + 1
+    g.run("order check", boom)
+    assert len(sent) == 2 and "3x" in sent[1]
+    assert g.run("clock", lambda a: a + 1, 1) == 2                     # normal calls pass through
+    act = store.read_activity()
+    assert (act["kind"] == "error").sum() >= 3
+
+
+def test_pacer_spaces_calls():
+    import dt_runner
+    now, slept = [0.0], []
+    p = dt_runner.Pacer(0.12, clock=lambda: now[0], sleep=lambda s: (slept.append(s), now.__setitem__(0, now[0] + s)))
+    p.wait(); p.wait()
+    now[0] += 0.5
+    p.wait()
+    assert len(slept) == 1 and abs(slept[0] - 0.12) < 1e-9
+
+
+def test_early_close_days():
+    """Half days (13:00 close): no new entries from 11:45, flat at 12:45 - in the setups, the paper
+    simulator and the order manager. Normal days unchanged."""
+    from datetime import date, time as t_
+    assert bars.session_times(date(2026, 11, 25)) == (t_(12, 0), t_(15, 0), t_(16, 0))
+    assert bars.session_times(date(2026, 11, 27)) == (t_(11, 45), t_(12, 45), t_(13, 0))
+    half = lambda hhmm: pd.Timestamp(f"2026-11-27 {hhmm}", tz=cfg.TZ).tz_convert("UTC")
+    from dt_strategies import _make
+    df = pd.DataFrame({"open": [10.0] * 2}, index=[half("11:44"), half("11:45")])
+    p = {"entry_valid_bars": 30}
+    s = _make("TST", "test", "long", df, 0, 1, 10.0, 9.5, 2.0, p, "")         # ready 11:45 -> too late
+    assert s is None
+    df2 = pd.DataFrame({"open": [10.0]}, index=[half("11:30")])
+    s = _make("TST", "test", "long", df2, 0, 1, 10.0, 9.5, 2.0, p, "")
+    assert s is not None and s.valid_until <= half("11:45")
+    sim = Sim()
+    sim.add_setup(Setup("TST", "test", "long", half("10:00"), half("10:01"), 10.0, 9.5, 11.0, half("10:30"), ""))
+    sim.on_bar("TST", half("10:01"), 10.0, 10.05, 9.99, 10.02)
+    assert "TST" in sim.positions
+    sim.on_bar("TST", half("12:45"), 10.3, 10.3, 10.3, 10.3)
+    assert not sim.positions and sim.trades[-1]["exit_reason"].startswith("flatten")
+    from dt_executor import Executor
+    fb = FakeBroker()
+    ex = Executor(fb)
+    ex.add_setup(Setup("TST", "test", "long", half("11:40"), half("11:41"), 10.0, 9.5, 11.0, half("12:30"), ""))
+    ex.on_price("TST", 10.01, half("11:50"))
+    assert not fb.orders                                              # after the half-day cutoff
+
+
+class SlowCancelBroker(FakeBroker):
+    """cancel() is only a request: the order reports PendingCancel first, then its final state."""
+    def cancel(self, oid):
+        o = self.orders[oid]
+        if o["status"] not in ("Filled", "Canceled", "PartialWithdrawal"):
+            o["status"], o["_after"] = "PendingCancel", o.get("_after", "Canceled")
+
+    def order_state(self, oid):
+        o = self.orders[oid]
+        st = {"status": o["status"], "filled": o["filled"], "avg_price": o["avg_price"]}
+        if o["status"] == "PendingCancel":                            # next look: final
+            if o["_after"] == "Filled":
+                o.update(status="Filled", filled=o["intent"].shares, avg_price=o["intent"].price)
+            else:
+                o["status"] = o["_after"]
+        return st
+
+
+def test_executor_target_fills_during_cancel():
+    """Stop hit while the target fills at the same moment: must NOT send a second closing order."""
+    from dt_executor import Executor
+    fb = SlowCancelBroker()
+    ex = Executor(fb, sleep=lambda s: None)
+    ex.add_setup(setup(ready=1, valid=60))
+    ex.on_price("TST", 10.01, minute(5))
+    fb.fill("o1", 10.02)
+    ex.poll(minute(5))
+    fb.orders["o2"]["_after"] = "Filled"                              # the target fills while we cancel it
+    ex.on_price("TST", 9.49, minute(6))
+    assert not ex.positions and len(fb.orders) == 2, fb.orders       # closed as target, no exit order
+    assert store.read_trades()["exit_reason"].iloc[-1] == "target"
+
+
+def test_executor_partial_exit_fills_are_counted():
+    """An exit that fills 40 of 100 shares before the retry: the 40 keep their P&L in the trade."""
+    from dt_executor import Executor
+    fb = FakeBroker()
+    clock = [1000.0]
+    ex = Executor(fb, clock=lambda: clock[0], sleep=lambda s: None)
+    ex.add_setup(setup(ready=1, valid=60))
+    ex.on_price("TST", 10.01, minute(5))
+    fb.fill("o1", 10.05)
+    ex.poll(minute(5))
+    n = ex.positions["TST"]["shares"]
+    ex.on_price("TST", 9.49, minute(6))                               # stop -> exit order o3
+    o3 = fb.orders["o3"]
+    o3.update(filled=40, avg_price=9.45)                              # partly filled, still working
+    clock[0] += 11                                                    # retry time
+    ex.poll(minute(6))
+    assert ex.positions["TST"]["shares"] == n - 40 and ex.positions["TST"]["closed_shares"] == 40
+    fb.fill("o4", 9.40)                                               # the rest at 9.40
+    ex.poll(minute(6))
+    t = store.read_trades().iloc[-1]
+    exp_gross = (9.45 - 10.05) * 40 + (9.40 - 10.05) * (n - 40)
+    exp_costs = cfg.commission(n) + cfg.commission(40) + cfg.commission(n - 40)
+    assert int(t["shares"]) == n and abs(t["pnl"] - round(exp_gross - exp_costs, 2)) < 0.011, (t["pnl"], exp_gross - exp_costs)
+
+
 if __name__ == "__main__":
     tests =[(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

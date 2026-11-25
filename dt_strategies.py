@@ -84,10 +84,11 @@ def _make(symbol, strategy, side, df, i, tf, trig, stop, target_r, params, reaso
         return None
     t0 = df.index[i]
     ready = t0 + pd.Timedelta(minutes=tf)
-    if ready.tz_convert(cfg.TZ).time() >= bars.CUTOFF_T:
+    t_ready, cut_t, _, _ = bars.times_at(ready)                  # early-close days cut off earlier
+    if t_ready >= cut_t:
         return None
     valid = ready + pd.Timedelta(minutes=tf * params["entry_valid_bars"])
-    cutoff = ready.tz_convert(cfg.TZ).normalize() + pd.Timedelta(hours=bars.CUTOFF_T.hour, minutes=bars.CUTOFF_T.minute)
+    cutoff = ready.tz_convert(cfg.TZ).normalize() + pd.Timedelta(hours=cut_t.hour, minutes=cut_t.minute)
     valid = min(valid, cutoff.tz_convert("UTC"))
     return Setup(symbol, strategy, side, t0, ready, _r(trig), _r(stop), _r(target), valid, reason, extra or {})
 
