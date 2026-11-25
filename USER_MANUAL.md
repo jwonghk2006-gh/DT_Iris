@@ -98,7 +98,7 @@ cd $HOME\Documents\DT_Iris
 
 | To do | Command |
 |---|---|
-| Guard tests (after any change) | `.venv\Scripts\python.exe test_dt.py` (expect `25/25 passed`) |
+| Guard tests (after any change) | `.venv\Scripts\python.exe test_dt.py` (expect `26/26 passed`) |
 | Dashboard | double-click `run_dashboard.bat`, open `http://localhost:8518` |
 | Scan now (if the scheduled scan was missed; before 09:30 ET) | `.venv\Scripts\python.exe dt_scanner.py` |
 | Scan only some symbols | `.venv\Scripts\python.exe dt_scanner.py --symbols PL,LULU` |

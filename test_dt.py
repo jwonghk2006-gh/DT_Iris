@@ -474,6 +474,39 @@ def test_opening_candle_replaced_by_history():
     assert bar == bad and "quote down" in note
 
 
+def test_scanner_requotes_dropped_symbols():
+    """2026-11-23: Longbridge's quote reply silently left out 267 symbols (AMD, TSM, DELL ...).
+    The scanner must ask again for the missing ones, and survive a failed call."""
+    import dt_scanner
+    from types import SimpleNamespace as NS
+
+    class Ctx:
+        def __init__(self, drop_first, fail_first=False):
+            self.calls, self.drop, self.fail = [], set(drop_first), fail_first
+        def quote(self, syms):
+            self.calls.append(list(syms))
+            if self.fail and len(self.calls) == 1:
+                raise RuntimeError("timeout")
+            keep = [s for s in syms if not (len(self.calls) == 1 and s in self.drop)]
+            return [NS(symbol=s) for s in keep]
+
+    chunk = ["AAPL.US", "AMD.US", "TSM.US", "NVDA.US"]
+    ctx = Ctx({"AMD.US", "TSM.US"})
+    got, left = dt_scanner._quote_batch(ctx, chunk, wait=0, log=lambda m: None)
+    assert sorted(q.symbol for q in got) == sorted(chunk) and left == [], (got, left)
+    assert ctx.calls[1] == ["AMD.US", "TSM.US"]                      # only the dropped ones asked again
+    ctx = Ctx(set(), fail_first=True)
+    got, left = dt_scanner._quote_batch(ctx, chunk, wait=0, log=lambda m: None)
+    assert len(got) == 4 and left == []
+    class Never(Ctx):
+        def quote(self, syms):
+            self.calls.append(list(syms))
+            return [NS(symbol=s) for s in syms if s != "BRK.B"]
+    ctx = Never(set())
+    got, left = dt_scanner._quote_batch(ctx, chunk + ["BRK.B"], retries=2, wait=0, log=lambda m: None)
+    assert left == ["BRK.B"] and len(ctx.calls) == 3 and len(got) == 4
+
+
 if __name__ == "__main__":
     tests =[(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

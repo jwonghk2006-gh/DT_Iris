@@ -161,18 +161,37 @@ def avg_daily_volume(sym: str, day: date) -> float | None:
     return float(vol.mean()) if len(vol) >= 10 else None
 
 
+QUOTE_RETRIES, QUOTE_RETRY_WAIT_S = 2, 0.5
+
+
+def _quote_batch(ctx, chunk: list[str], retries: int = QUOTE_RETRIES, wait: float = QUOTE_RETRY_WAIT_S,
+                 log=print) -> tuple[list, list[str]]:
+    """ctx.quote(chunk), then ask again for any symbol the reply left out (or the whole batch if the call
+    failed). 2026-11-23: Longbridge silently dropped 267 of 5,842 symbols - AMD, TSM, DELL, AMZN ... -
+    with no error, so the biggest gappers of the day never reached the list. Returns (quotes, still missing)."""
+    got, todo = {}, list(dict.fromkeys(chunk))
+    for attempt in range(retries + 1):
+        if attempt:
+            time.sleep(wait)
+        try:
+            for q in ctx.quote(todo):
+                got.setdefault(q.symbol, q)
+        except Exception as exc:
+            log(f"quote call for {len(todo)} symbols failed (try {attempt + 1}): {exc}")
+        todo = [s for s in todo if s not in got]
+        if not todo:
+            break
+    return list(got.values()), todo
+
+
 def _quote(ctx, symbols: list[str], day: date, log=print) -> tuple[list[dict], int]:
     """Premarket quote rows for `symbols`; returns (rows, number with a premarket quote from `day`)."""
     import dt_broker as broker
-    rows, live = [], 0
+    rows, live, missing = [], 0, []
     for k in range(0, len(symbols), BATCH):
         chunk = [broker.lb_symbol(s) for s in symbols[k:k + BATCH]]
-        try:
-            quotes = ctx.quote(chunk)
-        except Exception as exc:
-            log(f"quote batch {k // BATCH + 1} failed: {exc}")
-            time.sleep(1.0)
-            continue
+        quotes, left = _quote_batch(ctx, chunk, log=log)
+        missing += left
         for q in quotes:
             pm = q.pre_market_quote
             fresh = bool(pm and pm.last_done and pm.timestamp
@@ -194,6 +213,9 @@ def _quote(ctx, symbols: list[str], day: date, log=print) -> tuple[list[dict], i
             rows.append({"symbol": broker.plain(q.symbol), "price": px, "prev_close": prev, "gap_pct": gap,
                          "premarket_volume": pmv, "avg_daily_volume": None, "split": split})
         time.sleep(0.12)                                  # Longbridge allows about 10 quote calls a second
+    if missing:
+        log(f"no quote after {QUOTE_RETRIES} retries for {len(missing)} of {len(symbols)} symbols: "
+            f"{', '.join(missing[:12])}{' ...' if len(missing) > 12 else ''}")
     return rows, live
 
 

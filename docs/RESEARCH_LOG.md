@@ -235,3 +235,19 @@ Fix: `dt_runner.verified_bar` - for the first 15 minutes every pushed candle is 
 candle for that minute (differences logged as `bar_check`); guard test added (25/25). Replay of 24 Nov on
 clean bars: 10 setups instead of 20, same 2 trades (SNY +1.15R, ADI +0.43R). Cause of the bad push is
 inferred (likely extended-hours trades folded into the first candle); tonight's `bar_check` lines will show.
+
+## 2026-11-25: 09:00 list vs the open, and a scanner fault (fixed)
+
+Compared the locked 09:00 lists (20, 23, 24 Nov) with the real gaps at the open (Longbridge daily bars):
+- 50 of 68 picks (74%) still had a >= 4% gap in their direction at the open (20 Nov 12/22, 23 Nov 21/21,
+  24 Nov 17/25 on the relative gap); median change 09:00 -> open 1.9 points. Failures were mostly borderline
+  gaps (-4.0 to -4.9%) or thin names (TTI +12.1% -> +0.8%, CUE +8.1% -> +1.8%).
+- Overlap with the open-based backtest list was only 8/22, 10/21, 12/25. Causes: (1) SCANNER FAULT -
+  Longbridge's quote reply silently omitted 267 of 5,842 symbols on 23 Nov (AMD +12.4%, TSM +20.9%,
+  DELL +35.7%, MRVL, TSLA, GOOGL, AMZN, META ...) and ~21 on 20 Nov; (2) almost no pre-market trading on the
+  Nasdaq feed at 09:00 (DOCN, A, ONTO, TECK ...); (3) gaps that formed after 09:00 (SMTC, AEHR, ICHR);
+  (4) the relative-gap rule (by design); (5) different top-20 ranking (pre-market volume vs dollar volume).
+- Fix: `dt_scanner._quote_batch` re-asks for any symbol missing from a reply (2 retries) and logs what is
+  still missing; guard test added (26/26). Live check: 5,815 rows, only 6 dotted share classes missing.
+- Open question (not done): the backtests measure the gap at the open, the live list at 09:00. A 09:25
+  refresh or a backtest on 09:00 data would close that gap.

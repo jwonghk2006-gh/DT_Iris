@@ -45,6 +45,9 @@ except a ONE-OFF task "DT_Iris lbpaper runner (tonight)" the user approved for 2
 - The FIRST pushed 1-minute candle of a session can reach back to the previous close (seen 2026-11-24:
   Power Ranger stops 10-20% wide). `dt_runner.verified_bar` replaces pushed candles in the first 15 minutes
   with the candle history (logged as `bar_check` in activity). Check `bar_check` lines after a live session.
+- `quote()` can silently leave symbols out of its reply (23 Nov: 267 of 5,842, incl. AMD, TSM, DELL).
+  `dt_scanner._quote_batch` re-asks for missing ones; scan.log lists any still missing (6 dotted share classes
+  such as BRK.B / BF.B always are: lb_symbol does not map them).
 
 ## Dashboard look (the user's choice)
 Light blue sidebar `#dcecf8`, very light grey page `#f4f5f7`, default text 1.5x with a slider,
